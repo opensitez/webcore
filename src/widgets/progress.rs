@@ -43,6 +43,7 @@ pub struct Gauge {
     pub width: f32,
     pub height: f32,
     pub colors: WidgetColors,
+    pub rtl: bool,
 }
 
 impl Gauge {
@@ -53,6 +54,7 @@ impl Gauge {
             band: Band::Optimum,
             width: 160.0,
             height: 16.0,
+            rtl: false,
             colors: WidgetColors {
                 background: (240, 240, 240, 255),
                 border: (171, 171, 171, 255),
@@ -73,6 +75,17 @@ impl Gauge {
     }
 
     pub fn paint(&self, pixmap: &mut Pixmap, x: f32, y: f32, scale: f32) {
+        self.paint_with_clip(pixmap, x, y, scale, None);
+    }
+
+    pub fn paint_with_clip(
+        &self,
+        pixmap: &mut Pixmap,
+        x: f32,
+        y: f32,
+        scale: f32,
+        clip: Option<&tiny_skia::Mask>,
+    ) {
         if self.width <= 0.0 || self.height <= 0.0 {
             return;
         }
@@ -87,7 +100,7 @@ impl Gauge {
         let (r, g, b, a) = self.colors.background;
         paint.set_color_rgba8(r, g, b, a);
         if let Some(path) = rounded_rect_path(x, y, self.width, self.height, radius) {
-            pixmap.fill_path(&path, &paint, FillRule::Winding, ts, None);
+            pixmap.fill_path(&path, &paint, FillRule::Winding, ts, clip);
         }
 
         let (fr, fg, fb, fa) = self.fill_rgba();
@@ -97,13 +110,14 @@ impl Gauge {
             // stand-in for the animation, and unmistakably not a value.
             let w = self.width / 3.0;
             if let Some(path) = rounded_rect_path(x + w, y, w, self.height, radius) {
-                pixmap.fill_path(&path, &paint, FillRule::Winding, ts, None);
+                pixmap.fill_path(&path, &paint, FillRule::Winding, ts, clip);
             }
         } else {
             let fill_w = self.fraction.clamp(0.0, 1.0) * self.width;
             if fill_w > 0.0 {
-                if let Some(path) = rounded_rect_path(x, y, fill_w, self.height, radius) {
-                    pixmap.fill_path(&path, &paint, FillRule::Winding, ts, None);
+                let fill_x = if self.rtl { x + self.width - fill_w } else { x };
+                if let Some(path) = rounded_rect_path(fill_x, y, fill_w, self.height, radius) {
+                    pixmap.fill_path(&path, &paint, FillRule::Winding, ts, clip);
                 }
             }
         }
@@ -113,7 +127,7 @@ impl Gauge {
         let mut stroke = Stroke::default();
         stroke.width = 1.0;
         if let Some(path) = rounded_rect_path(x, y, self.width, self.height, radius) {
-            pixmap.stroke_path(&path, &paint, &stroke, ts, None);
+            pixmap.stroke_path(&path, &paint, &stroke, ts, clip);
         }
     }
 }
@@ -124,16 +138,44 @@ impl Gauge {
 /// the GOOD one. That last part is why a meter cannot be coloured by magnitude:
 /// for disk space used, low is good; for battery charge, high is.
 pub fn meter_band(value: f32, min: f32, max: f32, low: f32, high: f32, optimum: f32) -> Band {
-    if value < low || value > high {
-        // Outside the stated band. Whether that is merely suboptimal or bad
-        // depends on which side `optimum` is on.
-        let optimum_low = optimum < low;
-        let optimum_high = optimum > high;
-        if (value < low && optimum_high) || (value > high && optimum_low) {
-            return Band::Bad;
-        }
-        return Band::Suboptimal;
-    }
+    meter_band_f64(
+        value.into(),
+        min.into(),
+        max.into(),
+        low.into(),
+        high.into(),
+        optimum.into(),
+    )
+}
+
+pub(crate) fn meter_band_f64(
+    value: f64,
+    min: f64,
+    max: f64,
+    low: f64,
+    high: f64,
+    optimum: f64,
+) -> Band {
     let _ = (min, max);
-    Band::Optimum
+    if optimum < low {
+        if value <= low {
+            Band::Optimum
+        } else if value <= high {
+            Band::Suboptimal
+        } else {
+            Band::Bad
+        }
+    } else if optimum > high {
+        if value >= high {
+            Band::Optimum
+        } else if value >= low {
+            Band::Suboptimal
+        } else {
+            Band::Bad
+        }
+    } else if value < low || value > high {
+        Band::Suboptimal
+    } else {
+        Band::Optimum
+    }
 }

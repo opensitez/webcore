@@ -16,6 +16,147 @@ fn load_with_fonts(html: &str) -> Document {
     renderer.load_html(html, 900.0)
 }
 
+#[test]
+fn editable_shaped_hit_testing_never_splits_a_visible_grapheme() {
+    use unicode_segmentation::UnicodeSegmentation;
+    for text in ["ae\u{301}b", "a👩‍💻b", "a🇲🇦b", "مَرْحَبًا"] {
+        let doc = load_with_fonts(&format!("<p id=p contenteditable=true>{text}</p>"));
+        let id = doc.get_element_by_id("p").unwrap();
+        let node = doc.get_node(id).unwrap();
+        let flat = collect_flat_text(node);
+        let boundaries: Vec<_> = flat
+            .grapheme_indices(true)
+            .map(|(at, _)| at)
+            .chain(std::iter::once(flat.len()))
+            .collect();
+        for line in &node.layout.line_cache {
+            assert!(!line.char_x.is_empty());
+            for step in 0..200 {
+                let x = line.x + step as f32 * line.width / 199.0;
+                let offset = get_offset_from_x(&flat, &node.layout.inline_runs, line, x);
+                assert!(boundaries.contains(&offset), "{text:?} at {x}: {offset}");
+            }
+        }
+    }
+}
+
+#[test]
+fn editable_state_inherits_and_respects_false_and_plaintext_hosts() {
+    let doc = load_with_fonts(
+        "<div contenteditable=true><span id=yes>yes</span><div contenteditable=false><span id=no>no</span><span id=again contenteditable=plaintext-only>again</span></div><span id=invalid contenteditable=invalid>inherits</span></div><div id=plain contenteditable=plaintext-only>plain</div><p id=ordinary>ordinary</p>",
+    );
+    for (name, expected) in [
+        ("yes", true),
+        ("no", false),
+        ("again", true),
+        ("invalid", true),
+        ("plain", true),
+        ("ordinary", false),
+    ] {
+        assert_eq!(
+            crate::dom::is_in_contenteditable_by_id(
+                &doc.root,
+                doc.get_element_by_id(name).unwrap()
+            ),
+            expected,
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn document_editor_opt_in_allows_click_edit_without_editing_ordinary_pages() {
+    for enabled in [false, true] {
+        let mut doc = load_with_fonts("<p id=text>Editable demo</p>");
+        doc.editor.read_only = !enabled;
+        let id = doc.get_element_by_id("text").unwrap();
+        let line = doc.get_node(id).unwrap().layout.line_cache[0].clone();
+        assert!(doc.editor.handle_mouse_event(
+            &doc.root,
+            HtmlEventType::MouseDown,
+            (line.x + 2.0, line.y + line.height / 2.0),
+            0
+        ));
+        assert_eq!(
+            doc.editor.handle_key_event(
+                &mut doc.root,
+                HtmlEventType::KeyDown,
+                'x' as u32,
+                Some('x'),
+                false
+            ),
+            enabled
+        );
+        assert_eq!(collect_flat_text(&doc.root).contains('x'), enabled);
+    }
+}
+
+#[test]
+fn editing_table_content_invalidates_ancestor_geometry_and_expands_rows() {
+    let mut renderer = Renderer::new();
+    let mut doc = renderer.load_html("<div contenteditable=true><table style='width:200px'><tr><td id=cell>One</td><td>Two</td></tr></table></div>", 400.0);
+    let id = doc.get_element_by_id("cell").unwrap();
+    let node = doc.get_node(id).unwrap();
+    let before = node.layout.border_rect.h;
+    let line = node.layout.line_cache[0].clone();
+    doc.editor.handle_mouse_event(
+        &doc.root,
+        HtmlEventType::MouseDown,
+        (line.x + 2.0, line.y + line.height / 2.0),
+        0,
+    );
+    for ch in " more words".repeat(20).chars() {
+        assert!(doc.process_key_event(
+            HtmlEventType::KeyDown,
+            ch as u32,
+            Some(ch),
+            false,
+            false,
+            false,
+            false
+        ));
+    }
+    renderer.layout_engine().layout_no_cascade(&mut doc, 400.0);
+    let cell = doc.get_node(id).unwrap();
+    assert!(cell.layout.border_rect.h > before);
+    for line in &cell.layout.line_cache {
+        assert!(
+            line.y + line.height <= cell.layout.padding_rect.bottom() + 1.0,
+            "edited cell must grow around its lines"
+        );
+    }
+}
+
+#[test]
+fn empty_contenteditable_caret_lines_use_computed_height_and_direction() {
+    for direction in ["ltr", "rtl"] {
+        for text in ["", "Hello<br>"] {
+            let doc = load_with_fonts(&format!(
+                "<div id=edit contenteditable=true style='width:200px;font:20px/40px sans-serif;direction:{direction}'>{text}</div>"
+            ));
+            let node = doc
+                .get_node(doc.get_element_by_id("edit").unwrap())
+                .unwrap();
+            let line = node.layout.line_cache.last().expect("editing line");
+            assert_eq!(line.text_length, 0);
+            assert!(
+                (line.height - 40.0).abs() < 0.1,
+                "empty editing line must retain computed line-height"
+            );
+            let expected_x = if direction == "rtl" {
+                node.layout.content_rect.right()
+            } else {
+                node.layout.content_rect.x
+            };
+            assert!(
+                (line.x - expected_x).abs() < 0.1,
+                "empty caret line must use the inline-start edge: direction={direction}, text={text:?}, x={}, expected={expected_x}",
+                line.x
+            );
+        }
+    }
+}
+
 fn find_editable_box(root: &WebCore) -> Option<&WebCore> {
     if root
         .attributes
@@ -110,6 +251,230 @@ fn user_select_all_selects_the_whole_element() {
 }
 
 #[test]
+fn anonymous_inline_selection_respects_restored_and_excluded_spans() {
+    for (parent, child, allowed) in [("text", "none", false), ("none", "text", true)] {
+        let mut doc = load_with_fonts(&format!(
+            "<label id=l style='user-select:{parent}'><span style='user-select:{child}'>inline text</span><input style='display:block'></label>"
+        ));
+        let id = doc.get_element_by_id("l").unwrap();
+        let owner = doc.get_node(id).unwrap();
+        let fragment = owner
+            .children
+            .iter()
+            .find(|node| node.node_id == 0 && !node.layout.line_cache.is_empty())
+            .expect("anonymous text fragment");
+        let line = &fragment.layout.line_cache[0];
+        let flat = collect_flat_text(fragment);
+        let point = (
+            get_caret_x(&flat, &fragment.layout.inline_runs, line, 2),
+            line.y + line.height / 2.0,
+        );
+        assert_eq!(
+            doc.editor
+                .handle_mouse_event(&doc.root, HtmlEventType::MouseDown, point, 0),
+            allowed,
+            "{parent}/{child}"
+        );
+        if allowed {
+            assert_eq!(doc.editor.caret_box, Some(id));
+        }
+    }
+}
+
+#[test]
+fn anonymous_inline_selection_highlight_excludes_none() {
+    let mut doc = load_with_fonts(
+        "<label id=l style='user-select:none'><span style='user-select:text'>first</span><span style='user-select:none'>excluded</span><span style='user-select:text'>last</span><input style='display:block'></label>",
+    );
+    let id = doc.get_element_by_id("l").unwrap();
+    doc.editor.set_caret_from_hit(id, 0, false);
+    doc.editor.set_caret_from_hit(id, 17, true);
+    assert_eq!(
+        doc.editor.selection_segments(&doc.root),
+        vec![(id, 0, 5), (id, 13, 17)]
+    );
+}
+
+#[test]
+fn anonymous_inline_atomic_selection_keeps_real_owner_offsets() {
+    let mut doc = load_with_fonts(
+        "<label id=l>prefix <span style='user-select:all'>atomic <b>text</b></span><input style='display:block'></label>",
+    );
+    let id = doc.get_element_by_id("l").unwrap();
+    let owner = doc.get_node(id).unwrap();
+    let fragment = owner
+        .children
+        .iter()
+        .find(|node| node.node_id == 0 && !node.layout.line_cache.is_empty())
+        .expect("anonymous text fragment");
+    let line = &fragment.layout.line_cache[0];
+    let flat = collect_flat_text(fragment);
+    let start = flat.find("atomic").unwrap();
+    let point = (
+        get_caret_x(&flat, &fragment.layout.inline_runs, line, start + 2),
+        line.y + line.height / 2.0,
+    );
+    assert!(
+        doc.editor
+            .handle_mouse_event(&doc.root, HtmlEventType::MouseDown, point, 0)
+    );
+    assert_eq!(doc.editor.caret_box, Some(id));
+    assert_eq!(
+        doc.editor.selection_segments(&doc.root),
+        vec![(id, start, start + "atomic text".len())]
+    );
+}
+
+#[test]
+fn initial_inline_selection_respects_descendant_used_values() {
+    for (parent, child, allowed) in [
+        ("text", "none", false),
+        ("none", "auto", false),
+        ("none", "text", true),
+        ("text", "text", true),
+    ] {
+        let mut doc = load_with_fonts(&format!(
+            "<p id=p style='user-select:{parent}'>before <span style='user-select:{child}'>inside</span> after</p>"
+        ));
+        let id = doc.get_element_by_id("p").unwrap();
+        let node = doc.get_node(id).unwrap();
+        let flat = collect_flat_text(node);
+        let offset = flat.find("inside").unwrap() + 2;
+        let line = &node.layout.line_cache[0];
+        let point = (
+            get_caret_x(&flat, &node.layout.inline_runs, line, offset),
+            line.y + line.height / 2.0,
+        );
+        assert_eq!(
+            doc.editor
+                .handle_mouse_event(&doc.root, HtmlEventType::MouseDown, point, 0),
+            allowed,
+            "{parent}/{child}"
+        );
+        if allowed {
+            assert_eq!(doc.editor.caret_box, Some(id));
+        }
+    }
+}
+
+#[test]
+fn inline_user_select_all_selects_rendered_range_in_line_owner() {
+    let mut doc = load_with_fonts(
+        "<p id=p>before <span style='user-select:all'>atomic <b>text</b></span> after</p>",
+    );
+    let id = doc.get_element_by_id("p").unwrap();
+    let node = doc.get_node(id).unwrap();
+    let flat = collect_flat_text(node);
+    let start = flat.find("atomic").unwrap();
+    let end = start + "atomic text".len();
+    let line = &node.layout.line_cache[0];
+    let point = (
+        get_caret_x(&flat, &node.layout.inline_runs, line, start + 2),
+        line.y + line.height / 2.0,
+    );
+    assert!(
+        doc.editor
+            .handle_mouse_event(&doc.root, HtmlEventType::MouseDown, point, 0)
+    );
+    assert_eq!(doc.editor.caret_box, Some(id));
+    assert_eq!(
+        doc.editor.selection_segments(&doc.root),
+        vec![(id, start, end)]
+    );
+}
+
+#[test]
+fn inline_selection_paint_excludes_none_and_restores_text() {
+    for parent in ["text", "none"] {
+        let mut doc = load_with_fonts(&format!(
+            "<p id=p style='user-select:{parent}'><span style='user-select:text'>first</span><span style='user-select:none'>excluded</span><span style='user-select:text'>last</span></p>"
+        ));
+        let id = doc.get_element_by_id("p").unwrap();
+        doc.editor.set_caret_from_hit(id, 0, false);
+        doc.editor
+            .set_caret_from_hit(id, "firstexcludedlast".len(), true);
+        assert_eq!(
+            doc.editor.selection_segments(&doc.root),
+            vec![(id, 0, 5), (id, 13, 17)],
+            "{parent}"
+        );
+    }
+}
+
+#[test]
+fn explicit_user_select_text_restores_selection_inside_none() {
+    for (value, allowed) in [
+        ("auto", false),
+        ("none", false),
+        ("text", true),
+        ("all", true),
+    ] {
+        let mut doc = load_with_fonts(&format!(
+            "<div style='user-select:none'><p id=p style='user-select:{value}'>selectable text</p></div>"
+        ));
+        let id = doc.get_element_by_id("p").unwrap();
+        let line = doc.get_node(id).unwrap().layout.line_cache[0].clone();
+        assert_eq!(
+            doc.editor.handle_mouse_event(
+                &doc.root,
+                HtmlEventType::MouseDown,
+                (line.x + 5.0, line.y + line.height / 2.0),
+                0
+            ),
+            allowed,
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn user_select_all_propagates_atomically_but_text_descendant_is_independent() {
+    for (value, outer_selected) in [("auto", true), ("all", true), ("text", false)] {
+        let mut doc = load_with_fonts(&format!(
+            "<div id=outer style='user-select:all'><p id=p style='user-select:{value}'>inner text</p><p>outer text</p></div>"
+        ));
+        let id = doc.get_element_by_id("p").unwrap();
+        let outer = doc.get_element_by_id("outer").unwrap();
+        let line = doc.get_node(id).unwrap().layout.line_cache[0].clone();
+        assert!(doc.editor.handle_mouse_event(
+            &doc.root,
+            HtmlEventType::MouseDown,
+            (line.x + 5.0, line.y + line.height / 2.0),
+            0
+        ));
+        assert_eq!(
+            doc.editor.caret_box,
+            Some(if outer_selected { outer } else { id }),
+            "{value}"
+        );
+        assert_eq!(doc.editor.has_selection(), outer_selected, "{value}");
+    }
+}
+
+#[test]
+fn cross_container_selection_excludes_none_but_includes_restored_descendant() {
+    let mut doc = load_with_fonts(
+        "<p id=a>first</p><div style='user-select:none'><p id=b>excluded</p><p id=c style='user-select:text'>included</p></div><p id=d>last</p>",
+    );
+    let ids = ["a", "b", "c", "d"].map(|s| doc.get_element_by_id(s).unwrap());
+    let points = [ids[0], ids[3]].map(|id| {
+        let line = &doc.get_node(id).unwrap().layout.line_cache[0];
+        (line.x + 2.0, line.y + line.height / 2.0)
+    });
+    doc.process_mouse_event(HtmlEventType::MouseDown, points[0], 0);
+    doc.process_mouse_event(HtmlEventType::MouseMove, points[1], 0);
+    doc.process_mouse_event(HtmlEventType::MouseUp, points[1], 0);
+    assert_eq!(
+        doc.editor
+            .selection_segments(&doc.root)
+            .iter()
+            .map(|s| s.0)
+            .collect::<Vec<_>>(),
+        [ids[0], ids[2], ids[3]]
+    );
+}
+
+#[test]
 fn selecting_plain_text_does_not_make_it_editable() {
     let mut doc = load_with_fonts(r#"<div id="plain">fixed text</div>"#);
     let plain = doc.get_element_by_id("plain").unwrap();
@@ -133,6 +498,106 @@ fn selecting_plain_text_does_not_make_it_editable() {
         crate::layout::inline_layout::collect_flat_text(doc.get_box_by_id(plain).unwrap()),
         "fixed text",
     );
+}
+
+#[test]
+fn readonly_page_shift_click_extends_and_secondary_click_preserves_selection() {
+    let mut doc = load_with_fonts("<p id=p>abcdefgh</p>");
+    let id = doc.get_element_by_id("p").unwrap();
+    let first = crate::layout::hit_test::offset_to_point(&doc.root, id, 1, 0.0, 0.0).unwrap();
+    let last = crate::layout::hit_test::offset_to_point(&doc.root, id, 6, 0.0, 0.0).unwrap();
+    let first = (first.0, first.1 + 5.0);
+    let last = (last.0, last.1 + 5.0);
+    doc.process_mouse_event(HtmlEventType::MouseDown, first, 0);
+    doc.process_mouse_event(HtmlEventType::MouseUp, first, 0);
+    let anchor = doc.editor.sel_anchor;
+    doc.process_mouse_event_with_modifiers(
+        HtmlEventType::MouseDown,
+        last,
+        0,
+        false,
+        true,
+        false,
+        false,
+    );
+    doc.process_mouse_event_with_modifiers(
+        HtmlEventType::MouseUp,
+        last,
+        0,
+        false,
+        true,
+        false,
+        false,
+    );
+    assert_eq!(doc.editor.sel_anchor, anchor);
+    assert!(doc.editor.has_selection());
+    assert!(doc.editor.caret_info().is_none());
+    let range = (doc.editor.sel_start, doc.editor.sel_end);
+    doc.process_mouse_event(HtmlEventType::MouseDown, first, 2);
+    doc.process_mouse_event(HtmlEventType::MouseUp, first, 2);
+    assert_eq!((doc.editor.sel_start, doc.editor.sel_end), range);
+}
+
+#[test]
+fn caret_extension_does_not_reuse_another_containers_anchor() {
+    let mut editor = crate::dom::Editor::new();
+    editor.set_caret_from_hit(1, 5, false);
+    editor.set_caret_from_hit(2, 1, true);
+    assert_eq!(
+        (editor.sel_anchor, editor.sel_start, editor.sel_end),
+        (1, 1, 1)
+    );
+}
+
+#[test]
+fn mixed_block_label_text_has_a_real_selection_owner() {
+    let mut doc = load_with_fonts(
+        "<style>label,input{display:block}</style><label id=l>UTF-16 length limit<input value=ab></label>",
+    );
+    let id = doc.get_element_by_id("l").unwrap();
+    let fragment = doc
+        .get_node(id)
+        .unwrap()
+        .children
+        .iter()
+        .find(|child| !child.layout.line_cache.is_empty())
+        .unwrap();
+    assert_eq!(fragment.node_id, 0);
+    let line = fragment.layout.line_cache[0].clone();
+    let first = (line.x + 1.0, line.y + line.height / 2.0);
+    let last = (line.x + line.width - 1.0, first.1);
+    assert_eq!(
+        crate::layout::hit_test::point_to_hit(&doc.root, first, 0)
+            .unwrap()
+            .node_id,
+        id
+    );
+    doc.process_mouse_event(HtmlEventType::MouseDown, first, 0);
+    doc.process_mouse_event(HtmlEventType::MouseMove, last, 0);
+    doc.process_mouse_event(HtmlEventType::MouseUp, last, 0);
+    assert_eq!(doc.editor.caret_box, Some(id));
+    assert!(doc.editor.has_selection());
+    assert!(!doc.editor.selection_segments(&doc.root).is_empty());
+}
+
+#[test]
+fn readonly_drag_selects_across_text_containers_in_both_directions() {
+    let mut doc =
+        load_with_fonts("<p id=a>first text</p><p id=b>middle text</p><p id=c>last text</p>");
+    let ids = ["a", "b", "c"].map(|s| doc.get_element_by_id(s).unwrap());
+    let points = ids.map(|id| {
+        let line = &doc.get_node(id).unwrap().layout.line_cache[0];
+        (line.x + 5.0, line.y + line.height / 2.0)
+    });
+    for (a, b) in [(0, 2), (2, 0)] {
+        doc.process_mouse_event(HtmlEventType::MouseDown, points[a], 0);
+        doc.process_mouse_event(HtmlEventType::MouseMove, points[b], 0);
+        doc.process_mouse_event(HtmlEventType::MouseUp, points[b], 0);
+        let segments = doc.editor.selection_segments(&doc.root);
+        assert_eq!(segments.iter().map(|s| s.0).collect::<Vec<_>>(), ids);
+        assert_eq!(segments[1], (ids[1], 0, "middle text".len()));
+        assert!(doc.editor.caret_info().is_none());
+    }
 }
 
 // ─── char_x population ───────────────────────────────────────────────────────

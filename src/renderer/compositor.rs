@@ -19,9 +19,43 @@ pub struct PaintSegment {
     pub backdrop_dependent: bool,
     pub tiles: TileManager,
     pub fixed_surface: Option<FixedSurface>,
+    pub direct_image_update: bool,
 }
 
 impl PaintSegment {
+    pub fn starts_with_opaque_viewport_base(&self, width: f32, height: f32) -> bool {
+        // A complete opaque base makes the destination identical to a cleared
+        // layer before subsequent commands, so no intermediate surface is needed.
+        let covers = |rect: &Rect| rect.x <= 0.0 && rect.y <= 0.0
+            && rect.right() >= width && rect.bottom() >= height;
+        for command in &self.list.commands {
+            match command {
+                PaintCmd::BeginFixedPosition | PaintCmd::EndFixedPosition
+                | PaintCmd::BeginStackingContext { .. } | PaintCmd::EndStackingContext
+                | PaintCmd::PopClip | PaintCmd::PopTransform => {},
+                PaintCmd::PushTransform { transform, .. }
+                    if *transform == [1.0, 0.0, 0.0, 1.0, 0.0, 0.0] => {},
+                PaintCmd::PushClip { rect, radius, radius_y }
+                    if covers(rect) && *radius == [0.0; 4] && *radius_y == [0.0; 4] => {},
+                PaintCmd::FillRect { rect, color, radius, radius_y }
+                    if covers(rect) && color.a == 255
+                        && *radius == [0.0; 4] && *radius_y == [0.0; 4] => return true,
+                PaintCmd::Image { rect, data } if covers(rect) => {
+                    let (pixels, w, h) = match data {
+                        super::display_list::ImageRef::Owned(pixels, w, h) => (pixels.as_slice(), *w, *h),
+                        super::display_list::ImageRef::Shared(pixels, w, h) => (pixels.as_slice(), *w, *h),
+                    };
+                    return w > 0 && h > 0
+                        && u64::from(w).checked_mul(u64::from(h))
+                            .and_then(|size| size.checked_mul(4)) == Some(pixels.len() as u64)
+                        && super::display_list_replay::rgba_is_opaque(pixels);
+                },
+                _ => return false,
+            }
+        }
+        false
+    }
+
     pub fn has_animated_transform(
         &self,
         overrides: &std::collections::HashMap<u32, [f32; 6]>,
@@ -276,6 +310,7 @@ impl PaintSegments {
                 backdrop_dependent: false,
                 tiles: TileManager::new(),
                 fixed_surface: None,
+                direct_image_update: false,
             })
             .collect();
         for (cmd, owner) in list.commands.iter().zip(owners) {
@@ -341,6 +376,7 @@ impl PaintSegments {
         let mut backdrop_changed = false;
         for (new, old) in self.segments.iter_mut().zip(previous.segments) {
             let unchanged = new.list.commands == old.list.commands;
+            new.direct_image_update = !unchanged && new.fixed && !new.backdrop_dependent;
             if unchanged && !(new.backdrop_dependent && backdrop_changed) {
                 new.tiles = old.tiles;
                 new.fixed_surface = old.fixed_surface;
@@ -913,6 +949,37 @@ mod tests {
     use crate::load_html;
 
     #[test]
+    fn direct_image_updates_require_complete_opaque_coverage() {
+        use super::super::display_list::ImageRef;
+        let mut segment = PaintSegment {
+            list: DisplayList::new(), fixed: true, backdrop_dependent: false,
+            tiles: TileManager::new(), fixed_surface: None, direct_image_update: true,
+        };
+        let image = PaintCmd::Image {
+            rect: Rect { x: 0.0, y: 0.0, w: 100.0, h: 60.0 },
+            data: ImageRef::Owned(vec![255; 16], 2, 2),
+        };
+        segment.list.push(image.clone());
+        assert!(segment.starts_with_opaque_viewport_base(100.0, 60.0));
+        segment.list.commands.insert(0, PaintCmd::PopClip);
+        assert!(segment.starts_with_opaque_viewport_base(100.0, 60.0));
+        segment.list.commands.remove(0);
+        assert!(!segment.starts_with_opaque_viewport_base(101.0, 60.0));
+        segment.list.commands.insert(0, PaintCmd::PushOpacity { alpha: 0.5 });
+        assert!(!segment.starts_with_opaque_viewport_base(100.0, 60.0));
+        segment.list.commands[0] = PaintCmd::PushClip {
+            rect: Rect { x: 0.0, y: 0.0, w: 100.0, h: 60.0 },
+            radius: [5.0; 4], radius_y: [5.0; 4],
+        };
+        assert!(!segment.starts_with_opaque_viewport_base(100.0, 60.0));
+        segment.list.commands.remove(0);
+        if let PaintCmd::Image { data: ImageRef::Owned(bytes, ..), .. } = &mut segment.list.commands[0] {
+            bytes[3] = 254;
+        }
+        assert!(!segment.starts_with_opaque_viewport_base(100.0, 60.0));
+    }
+
+    #[test]
     fn fixed_segment_ignores_unrelated_transform_animation() {
         let mut segment = PaintSegment {
             list: DisplayList::new(),
@@ -920,6 +987,7 @@ mod tests {
             backdrop_dependent: false,
             tiles: TileManager::new(),
             fixed_surface: None,
+            direct_image_update: false,
         };
         segment.list.push(PaintCmd::PushTransform {
             node_id: 7,

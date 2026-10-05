@@ -10,6 +10,110 @@ use crate::layout::LayoutEngine;
 use crate::types::*;
 use std::time::{Duration, Instant};
 
+fn selected_keyframe_transform(sheet: &Stylesheet, name: &str) -> Option<String> {
+    sheet
+        .keyframes
+        .get(name)?
+        .last()?
+        .properties
+        .iter()
+        .find(|(property, _)| property == "transform")
+        .map(|(_, value)| value.clone())
+}
+
+#[test]
+fn conditional_keyframes_follow_viewport_without_reparsing() {
+    let mut sheet = Stylesheet::default();
+    sheet.parse_and_add_author(
+        r#"
+        @keyframes move { to { transform: translateX(10px) } }
+        @media (min-width: 600px), (orientation: portrait) {
+            @media (min-height: 400px) {
+                @keyframes move { to { transform: translateX(20px) } }
+            }
+        }
+    "#,
+    );
+    sheet.set_layer_viewport(500.0, 400.0);
+    assert_eq!(
+        selected_keyframe_transform(&sheet, "move").as_deref(),
+        Some("translateX(10px)")
+    );
+    let narrow = sheet.keyframes["move"].clone();
+    sheet.set_layer_viewport(700.0, 500.0);
+    assert_eq!(
+        selected_keyframe_transform(&sheet, "move").as_deref(),
+        Some("translateX(20px)")
+    );
+    sheet.set_layer_viewport(700.0, 300.0);
+    assert!(std::sync::Arc::ptr_eq(&narrow, &sheet.keyframes["move"]));
+    sheet.set_layer_viewport(300.0, 500.0);
+    assert_eq!(
+        selected_keyframe_transform(&sheet, "move").as_deref(),
+        Some("translateX(20px)")
+    );
+}
+
+#[test]
+fn keyframe_collisions_follow_origin_layers_and_source_order() {
+    let mut sheet = Stylesheet::default();
+    sheet.parse_and_add_author(
+        r#"
+        @layer first, second;
+        @layer second { @keyframes move { to { transform: translateX(20px) } } }
+        @layer first { @keyframes move { to { transform: translateX(10px) } } }
+    "#,
+    );
+    assert_eq!(
+        selected_keyframe_transform(&sheet, "move").as_deref(),
+        Some("translateX(20px)")
+    );
+    sheet.parse_and_add_author("@keyframes move { to { transform: translateX(30px) } }");
+    sheet.parse_and_add("@keyframes move { to { transform: translateX(99px) } }");
+    assert_eq!(
+        selected_keyframe_transform(&sheet, "move").as_deref(),
+        Some("translateX(30px)")
+    );
+    let mut fragment = Stylesheet::default();
+    fragment.parse_and_add_author("@keyframes move { to { transform: translateX(40px) } }");
+    sheet.append_fragment(fragment);
+    assert_eq!(
+        selected_keyframe_transform(&sheet, "move").as_deref(),
+        Some("translateX(40px)")
+    );
+}
+
+#[test]
+fn keyframes_preserve_link_media_and_global_container_definitions() {
+    let mut sheet = Stylesheet::default();
+    sheet.parse_and_add_author(
+        r#"
+        @container never (width > 9999px) {
+            @keyframes global { to { transform: translateX(10px) } }
+        }
+        @scope (.absent) { @keyframes scoped { to { transform: translateX(30px) } } }
+        @supports (unknown-property: unsupported) {
+            @keyframes hidden { to { transform: translateX(99px) } }
+        }
+    "#,
+    );
+    sheet.parse_and_add_with_base_media(
+        "@media (min-height: 400px) { @keyframes linked { to { transform: translateX(20px) } } }",
+        "https://example.org/style.css",
+        "(min-width: 600px)",
+    );
+    sheet.set_layer_viewport(500.0, 500.0);
+    assert!(sheet.keyframes.contains_key("global"));
+    assert!(sheet.keyframes.contains_key("scoped"));
+    assert!(!sheet.keyframes.contains_key("hidden"));
+    assert!(!sheet.keyframes.contains_key("linked"));
+    sheet.set_layer_viewport(700.0, 500.0);
+    assert!(sheet.keyframes.contains_key("linked"));
+    sheet.set_layer_viewport(700.0, 300.0);
+    assert!(!sheet.keyframes.contains_key("linked"));
+    assert!(!sheet.is_plain_rules_fragment());
+}
+
 // ── Easing function parsing ───────────────────────────────────────────────────
 
 #[test]
@@ -256,6 +360,168 @@ fn extract_keyframes_basic() {
     assert_eq!(stops.len(), 2);
     assert!((stops[0].offset - 0.0).abs() < 1e-4);
     assert!((stops[1].offset - 1.0).abs() < 1e-4);
+}
+
+#[test]
+fn keyframe_rule_names_and_preludes_use_css_tokens() {
+    let frames = extract_keyframes(
+        r#"
+        @import url(a;{b);
+        @k\65 yframes p\75 lse { FROM {opacity:0} t\6f {opacity:1} }
+        @keyframes "pulse" { from {opacity:0.5} to {opacity:1} }
+        @keyframes Pulse { from {opacity:0.25} }
+        @keyframes "semi;{name}" { from {opacity:0} }
+        @keyframes none { from {opacity:0} }
+        @keyframes initial { from {opacity:0} }
+        @keyframes "none" { from {opacity:1} }
+        @keyframes "" { from {opacity:0} }
+        @keyframes two names { from {opacity:0} }
+        @keyframes-extra ignored { from {opacity:0} }
+        @unknown { @keyframes hidden { from {opacity:0} } }
+        .content { content:'@keyframes fake {from {opacity:0}}' }
+    "#,
+    );
+    assert_eq!(frames.len(), 4);
+    assert_eq!(
+        frames["pulse"][0].properties,
+        vec![("opacity".into(), "0.5".into())]
+    );
+    assert!(frames.contains_key("Pulse"));
+    assert!(frames.contains_key("semi;{name}"));
+    assert!(frames.contains_key("none"));
+    let unicode = format!(
+        "@{} {{}} @keyframes eof {{ from {{ opacity:1",
+        "é".repeat(20)
+    );
+    assert_eq!(
+        extract_keyframes(&unicode)["eof"][0].properties,
+        vec![("opacity".into(), "1".into())]
+    );
+}
+
+#[test]
+fn animation_references_decode_quoted_and_escaped_names() {
+    for source in [
+        r#""quoted;{name" 2s linear -1s both paused"#,
+        r#"p\75 lse 2s linear"#,
+    ] {
+        let parsed = parse_animation_shorthand(source);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(
+            parsed[0].name,
+            if source.starts_with('"') {
+                "quoted;{name"
+            } else {
+                "pulse"
+            }
+        );
+    }
+    let mut style = ComputedStyle::default();
+    crate::css::apply_property(&mut style, "animation-name", r#""quoted;{name", p\75 lse"#);
+    assert_eq!(style.rare().animations[0].name, "quoted;{name");
+    assert_eq!(style.rare().animations[1].name, "pulse");
+    crate::css::apply_property(&mut style, "animation-name", "two names");
+    assert_eq!(style.rare().animations[0].name, "quoted;{name");
+}
+
+#[test]
+fn quoted_none_animation_survives_cssom_and_runtime() {
+    let mut doc = parse_html(
+        r#"<style>
+        @keyframes "none" { from { opacity:0 } to { opacity:1 } }
+        #box { animation: "none" 2s linear -1s both paused }
+    </style><div id="box">animated</div>"#,
+    );
+    LayoutEngine::new().layout(&mut doc, 800.0);
+    let id = doc.get_element_by_id("box").unwrap();
+    assert_eq!(doc.active_animations.len(), 1);
+    assert_eq!(doc.active_animations[0].animation.name, "none");
+    let now = Instant::now();
+    doc.tick_animations(now);
+    assert!(
+        doc.animation_overrides[&id]
+            .iter()
+            .any(|(name, value)| name == "opacity" && value == "0.5")
+    );
+    assert_eq!(
+        doc.computed_style_property(id, "animation-name"),
+        r#""none""#
+    );
+    let shorthand = doc.computed_style_property(id, "animation");
+    assert_eq!(parse_animation_shorthand(&shorthand)[0].name, "none");
+    doc.set_style_property(id, "animation", &shorthand);
+    LayoutEngine::new().layout(&mut doc, 800.0);
+    assert_eq!(doc.active_animations.len(), 1);
+    assert_eq!(
+        doc.get_style_property(id, "animation-name"),
+        Some(r#""none""#.into())
+    );
+    doc.set_style_property(id, "animation-name", "none");
+    LayoutEngine::new().layout(&mut doc, 800.0);
+    assert!(doc.active_animations.is_empty());
+    assert_eq!(doc.computed_style_property(id, "animation-name"), "none");
+}
+
+#[test]
+fn animation_names_round_trip_computed_and_inline_serialization() {
+    let mut doc = parse_html("<div id='box'></div>");
+    let id = doc.get_element_by_id("box").unwrap();
+    for name in [
+        "none",
+        "initial",
+        "linear",
+        "reverse",
+        "semi;{name",
+        "two words",
+        "123",
+        "quote\"slash\\",
+    ] {
+        let quoted = format!("\"{}\"", name.replace('\\', "\\\\").replace('"', "\\\""));
+        doc.set_style_property(id, "animation", &format!("{quoted} 2s linear"));
+        LayoutEngine::new().layout(&mut doc, 800.0);
+        assert_eq!(
+            doc.get_computed_style(id).unwrap().rare().animations[0].name,
+            name
+        );
+        let computed_name = doc.computed_style_property(id, "animation-name");
+        let mut style = ComputedStyle::default();
+        crate::css::apply_property(&mut style, "animation-name", &computed_name);
+        assert_eq!(style.rare().animations[0].name, name);
+        let shorthand = doc.computed_style_property(id, "animation");
+        assert_eq!(parse_animation_shorthand(&shorthand)[0].name, name);
+    }
+}
+
+#[test]
+fn keyframe_selector_lists_reject_invalid_members_and_keep_nearby_offsets() {
+    let frames = extract_keyframes(
+        r#"@keyframes sample {
+        0%, 101% { opacity:0 }
+        10 % { opacity:0 }
+        10\% { opacity:0 }
+        from, { opacity:0 }
+        f\72om { opacity:0.1 }
+        50% { opacity:0.5; left:1px }
+        50.001% { opacity:0.6 }
+        50% { opacity:0.7 }
+        TO { opacity:1; opacity:0 !important; animation-name:bad; animation:bad 1s;
+             animation-duration:2s; animation-timing-function:linear }
+    }"#,
+    );
+    let stops = &frames["sample"];
+    assert_eq!(stops.len(), 4);
+    assert_eq!(stops[0].offset, 0.0);
+    assert_eq!(stops[1].offset, 0.5);
+    assert!(stops[2].offset > stops[1].offset);
+    assert!(stops[2].offset - stops[1].offset < 0.0001);
+    assert!(
+        stops[1]
+            .properties
+            .contains(&("opacity".into(), "0.7".into()))
+    );
+    assert!(stops[1].properties.contains(&("left".into(), "1px".into())));
+    assert_eq!(stops[3].properties, vec![("opacity".into(), "1".into())]);
+    assert!(stops[3].timing_fn.is_some());
 }
 
 #[test]

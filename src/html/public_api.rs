@@ -309,7 +309,9 @@ fn parse_html_full(
     wire_arena_children(&mut parser.arena, &mut html_box);
 
     // Build combined stylesheet (UA + document defaults + author)
-    let mut stylesheet = ua_stylesheet();
+    let mut stylesheet = crate::css::ua_sheet::ua_stylesheet_for_mode(
+        crate::html::doctype::quirks_mode(parser.doctype.as_ref()),
+    );
     if let Some(meta_color_scheme) = parser.meta_color_scheme.as_deref() {
         stylesheet.parse_and_add(&format!("html {{ color-scheme: {meta_color_scheme}; }}"));
     }
@@ -321,6 +323,18 @@ fn parse_html_full(
     }
     stylesheet.source_count += parser.stylesheet.source_count;
     stylesheet.keyframes.extend(parser.stylesheet.keyframes);
+    stylesheet
+        .keyframe_rules
+        .extend(
+            parser
+                .stylesheet
+                .keyframe_rules
+                .into_iter()
+                .map(|mut rule| {
+                    rule.author_origin = true;
+                    rule
+                }),
+        );
     // ⛔ At-rules travel with the rest. This merge carried rules, variables,
     // sources and keyframes and used to drop stylesheet-side metadata, so a web
     // font or counter style declared in an inline `<style>` was parsed, stored
@@ -338,6 +352,7 @@ fn parse_html_full(
             stylesheet.layer_order.push(name);
         }
     }
+    stylesheet.resolve_keyframes();
 
     let title = parser.title.clone();
     let linked_stylesheets = parser.linked_stylesheets.clone();
@@ -360,6 +375,7 @@ fn parse_html_full(
         stylesheet,
         title,
         base_url: base_url.to_string(),
+        navigation_url: None,
         arena: parser.arena,
         doctype: doctype_id,
         quirks,
@@ -367,6 +383,9 @@ fn parse_html_full(
         traversals: crate::dom::traversal::TraversalStore::new(),
         ranges: crate::dom::range::RangeStore::new(),
         top_layer: Vec::new(),
+        dialog_states: std::collections::HashMap::new(),
+        listbox_anchors: std::collections::HashMap::new(),
+        listbox_active_options: std::collections::HashMap::new(),
         suppress_range_updates: false,
         next_node_id: parser.next_node_id,
         node_index: std::collections::HashMap::new(),
@@ -397,6 +416,9 @@ fn parse_html_full(
         active_box: 0,
         focused_box: 0,
         mousedown_target: 0,
+        pointer_activation_target: None,
+        keyboard_activation_target: None,
+        keyboard_space_target: 0,
         last_click_target: 0,
         last_click_time: None,
         drag_source: 0,
@@ -411,7 +433,10 @@ fn parse_html_full(
         caret_blink_epoch: std::time::Instant::now(),
         open_select: 0,
         open_picker: 0,
+        picker_calendar: None,
+        picker_time: None,
         dropdown_hover_idx: -1,
+        dropdown_scroll: 0.0,
         // Transient interaction state, like the two popups beside it: a freshly
         // parsed document is holding nothing.
         dragging_range: 0,

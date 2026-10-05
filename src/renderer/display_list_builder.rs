@@ -123,7 +123,7 @@ fn gradient_line_length(
     rect: Rect,
     radial_radius_x: f32,
 ) -> f32 {
-    if kind == GradientType::Radial {
+    if kind.is_radial() {
         return radial_radius_x;
     }
     let angle = match direction {
@@ -1525,11 +1525,7 @@ fn build_for_box_inner(
             let layer_origin_rect = background_box(layer.origin);
             let blend_mode = background_blend_mode_to_u8(&layer.blend_mode);
             if layer.gradient_type != GradientType::None && layer.gradient_stops.len() >= 2 {
-                let grad_type_u8 = match layer.gradient_type {
-                    GradientType::Linear => 1u8,
-                    GradientType::Radial => 2u8,
-                    GradientType::None => 0u8,
-                };
+                let grad_type_u8 = layer.gradient_type.paint_kind();
                 let gradient_rect = background_gradient_rect(
                     layer.size,
                     &layer.size_w,
@@ -1555,7 +1551,7 @@ fn build_for_box_inner(
                 temp_style.gradient_radial_size = layer.gradient_radial_size;
                 temp_style.gradient_radial_radius_x = layer.gradient_radial_radius_x.clone();
                 temp_style.gradient_radial_radius_y = layer.gradient_radial_radius_y.clone();
-                let (radial_radius_x, radial_radius_y) = radial_gradient_used_radii(
+                let (radial_radius_x, radial_radius_y, radial_solid) = radial_gradient_used_radii(
                     &temp_style,
                     gradient_rect.w,
                     gradient_rect.h,
@@ -1565,7 +1561,7 @@ fn build_for_box_inner(
                     ctx.transform_ctx.root_font_px,
                 );
                 let (repeat_x_mode, repeat_y_mode) = layer.repeat.axis_modes();
-                let stops = crate::css::resolve_gradient_color_stops(
+                let mut stops = crate::css::resolve_gradient_color_stops(
                     &layer.gradient_stops,
                     gradient_line_length(
                         layer.gradient_type,
@@ -1579,6 +1575,12 @@ fn build_for_box_inner(
                         ..ctx.transform_ctx
                     },
                 );
+                if grad_type_u8 == 2 && radial_solid {
+                    if let Some(&(color, _)) = stops.last() {
+                        stops.clear();
+                        stops.push((color, 0.0));
+                    }
+                }
                 list.push(PaintCmd::Gradient {
                     rect: gradient_rect,
                     clip: layer_clip_rect,
@@ -1632,11 +1634,7 @@ fn build_for_box_inner(
         && node.style.gradient_type != GradientType::None
         && node.style.rare().gradient_stops.len() >= 2
     {
-        let grad_type_u8 = match node.style.gradient_type {
-            GradientType::Linear => 1u8,
-            GradientType::Radial => 2u8,
-            GradientType::None => 0u8,
-        };
+        let grad_type_u8 = node.style.gradient_type.paint_kind();
         let gradient_rect = background_gradient_rect(
             node.style.background_size,
             &node.style.background_size_w,
@@ -1657,7 +1655,7 @@ fn build_for_box_inner(
             gradient_rect.h,
             ctx.transform_ctx.root_font_px,
         );
-        let (radial_radius_x, radial_radius_y) = radial_gradient_used_radii(
+        let (radial_radius_x, radial_radius_y, radial_solid) = radial_gradient_used_radii(
             &node.style,
             gradient_rect.w,
             gradient_rect.h,
@@ -1666,7 +1664,7 @@ fn build_for_box_inner(
             font_px,
             ctx.transform_ctx.root_font_px,
         );
-        let stops = crate::css::resolve_gradient_color_stops(
+        let mut stops = crate::css::resolve_gradient_color_stops(
             &node.style.rare().gradient_stops,
             gradient_line_length(
                 node.style.gradient_type,
@@ -1680,6 +1678,12 @@ fn build_for_box_inner(
                 ..ctx.transform_ctx
             },
         );
+        if grad_type_u8 == 2 && radial_solid {
+            if let Some(&(color, _)) = stops.last() {
+                stops.clear();
+                stops.push((color, 0.0));
+            }
+        }
         if eff_style.background_clip == BackgroundClip::Text {
             has_text_gradient = true;
             list.push(PaintCmd::PushTextGradient {
@@ -2676,7 +2680,39 @@ fn radial_gradient_used_radii(
     cy: f32,
     font_px: f32,
     root_font_px: f32,
+) -> (f32, f32, bool) {
+    let (rx, ry) = radial_gradient_shape_radii(style, w, h, cx, cy, font_px, root_font_px);
+    // CSS Images 3 defines zero-radius shapes by their limiting geometry, not
+    // a one-pixel substitute. Keep length stops meaningful on that tiny ray.
+    const LIMITING_RADIUS: f32 = 1.0e-6;
+    const LIMITING_EXTENT_FACTOR: f32 = 1.0e6;
+    if style.gradient_radial_shape == GradientRadialShape::Circle {
+        if rx == 0.0 {
+            return (LIMITING_RADIUS, LIMITING_RADIUS, false);
+        }
+    } else {
+        let large_radius = w.max(h).max(1.0) * LIMITING_EXTENT_FACTOR;
+        // Zero width takes precedence when both ellipse radii are zero.
+        if rx == 0.0 {
+            return (LIMITING_RADIUS, large_radius, false);
+        }
+        if ry == 0.0 {
+            return (large_radius, LIMITING_RADIUS, true);
+        }
+    }
+    (rx, ry, false)
+}
+
+fn radial_gradient_shape_radii(
+    style: &ComputedStyle,
+    w: f32,
+    h: f32,
+    cx: f32,
+    cy: f32,
+    font_px: f32,
+    root_font_px: f32,
 ) -> (f32, f32) {
+    let used_radius = |radius: f32| radius.max(0.0);
     if !style.gradient_radial_radius_x.is_auto() {
         let rx = style
             .gradient_radial_radius_x
@@ -2686,42 +2722,47 @@ fn radial_gradient_used_radii(
             .resolve(font_px, h, root_font_px);
         return match style.gradient_radial_shape {
             GradientRadialShape::Circle => {
-                let r = rx.max(ry).max(1.0);
+                let r = used_radius(rx.max(ry));
                 (r, r)
             }
-            GradientRadialShape::Ellipse => (rx.max(1.0), ry.max(1.0)),
+            GradientRadialShape::Ellipse => (used_radius(rx), used_radius(ry)),
         };
     }
-    let left = cx.max(0.0);
-    let right = (w - cx).max(0.0);
-    let top = cy.max(0.0);
-    let bottom = (h - cy).max(0.0);
+    // CSS Images sizes against extended edge lines, including outside centers.
+    let left = cx.abs();
+    let right = (w - cx).abs();
+    let top = cy.abs();
+    let bottom = (h - cy).abs();
     match style.gradient_radial_size {
         GradientRadialSize::ClosestSide => match style.gradient_radial_shape {
             GradientRadialShape::Circle => {
-                let r = left.min(right).min(top.min(bottom)).max(1.0);
+                let r = used_radius(left.min(right).min(top.min(bottom)));
                 (r, r)
             }
-            GradientRadialShape::Ellipse => (left.min(right).max(1.0), top.min(bottom).max(1.0)),
+            GradientRadialShape::Ellipse => {
+                (used_radius(left.min(right)), used_radius(top.min(bottom)))
+            }
         },
         GradientRadialSize::FarthestSide => match style.gradient_radial_shape {
             GradientRadialShape::Circle => {
-                let r = left.max(right).max(top.max(bottom)).max(1.0);
+                let r = used_radius(left.max(right).max(top.max(bottom)));
                 (r, r)
             }
-            GradientRadialShape::Ellipse => (left.max(right).max(1.0), top.max(bottom).max(1.0)),
+            GradientRadialShape::Ellipse => {
+                (used_radius(left.max(right)), used_radius(top.max(bottom)))
+            }
         },
         GradientRadialSize::ClosestCorner => {
             let dx = left.min(right);
             let dy = top.min(bottom);
             match style.gradient_radial_shape {
                 GradientRadialShape::Circle => {
-                    let r = dx.hypot(dy).max(1.0);
+                    let r = used_radius(dx.hypot(dy));
                     (r, r)
                 }
                 GradientRadialShape::Ellipse => (
-                    (dx * std::f32::consts::SQRT_2).max(1.0),
-                    (dy * std::f32::consts::SQRT_2).max(1.0),
+                    used_radius(dx * std::f32::consts::SQRT_2),
+                    used_radius(dy * std::f32::consts::SQRT_2),
                 ),
             }
         }
@@ -2730,12 +2771,12 @@ fn radial_gradient_used_radii(
             let dy = top.max(bottom);
             match style.gradient_radial_shape {
                 GradientRadialShape::Circle => {
-                    let r = dx.hypot(dy).max(1.0);
+                    let r = used_radius(dx.hypot(dy));
                     (r, r)
                 }
                 GradientRadialShape::Ellipse => (
-                    (dx * std::f32::consts::SQRT_2).max(1.0),
-                    (dy * std::f32::consts::SQRT_2).max(1.0),
+                    used_radius(dx * std::f32::consts::SQRT_2),
+                    used_radius(dy * std::f32::consts::SQRT_2),
                 ),
             }
         }
@@ -3907,6 +3948,107 @@ fn build_list_marker(
 // Form element
 // ═══════════════════════════════════════════════════════════════════════════════
 
+pub(crate) fn control_text_layout(
+    node: &WebCore,
+    width: f32,
+) -> Option<super::display_list::ControlTextLayout> {
+    if node.tag != "textarea" {
+        return None;
+    }
+    let rtl = node.style.direction == crate::types::Direction::RTL;
+    let align = match node.style.text_align {
+        crate::types::TextAlign::Center => cosmic_text::Align::Center,
+        crate::types::TextAlign::Right => cosmic_text::Align::Right,
+        crate::types::TextAlign::Start if rtl => cosmic_text::Align::Right,
+        crate::types::TextAlign::End if !rtl => cosmic_text::Align::Right,
+        crate::types::TextAlign::Justify => cosmic_text::Align::Justified,
+        _ => cosmic_text::Align::Left,
+    };
+    Some(super::display_list::ControlTextLayout {
+        width: width.max(0.0),
+        wrap: if matches!(node.style.white_space, WhiteSpace::Pre | WhiteSpace::Nowrap) {
+            cosmic_text::Wrap::None
+        } else if node.style.word_break == crate::types::WordBreak::BreakAll {
+            cosmic_text::Wrap::Glyph
+        } else if node.style.word_break == crate::types::WordBreak::BreakWord
+            || matches!(
+                node.style.overflow_wrap,
+                crate::types::OverflowWrap::BreakWord | crate::types::OverflowWrap::Anywhere
+            )
+        {
+            cosmic_text::Wrap::WordOrGlyph
+        } else {
+            cosmic_text::Wrap::Word
+        },
+        align,
+    })
+}
+
+pub(crate) fn native_control_typography(
+    node: &WebCore,
+    style: &ComputedStyle,
+    font_px: f32,
+    root_font_px: f32,
+    width: f32,
+) -> PlaceholderTypography {
+    let mut typography = control_typography(style, font_px, root_font_px);
+    typography.layout = control_text_layout(node, width);
+    typography
+}
+
+pub(crate) fn control_typography(
+    style: &ComputedStyle,
+    font_px: f32,
+    root_font_px: f32,
+) -> PlaceholderTypography {
+    let size = style.font_size_px(font_px, root_font_px).max(1.0);
+    PlaceholderTypography {
+        opacity: style.opacity,
+        font_size: size,
+        font_weight: style.font_weight.value(),
+        font_style: match style.font_style {
+            FontStyle::Italic => 1,
+            FontStyle::Oblique => 2,
+            _ => 0,
+        },
+        font_family: style.font_family.clone(),
+        font_stretch: style.font_stretch,
+        normal_line_height: style.line_height.is_auto(),
+        line_height: style.line_height.resolve(size, size, root_font_px),
+        letter_spacing: style.letter_spacing.resolve(size, 0.0, root_font_px),
+        word_spacing: style.word_spacing.resolve(size, 0.0, root_font_px),
+        text_transform: style.text_transform,
+        shadow: style.text_shadow.clone(),
+        layout: None,
+        decoration: TextDecoration {
+            underline: style.text_decoration.underline,
+            overline: style.text_decoration.overline,
+            strikethrough: style.text_decoration.strikethrough,
+            color: style.text_decoration_color.unwrap_or(style.color),
+            style: match style.text_decoration_style {
+                TextDecorationStyle::Double => 1,
+                TextDecorationStyle::Dotted => 2,
+                TextDecorationStyle::Dashed => 3,
+                TextDecorationStyle::Wavy => 4,
+                _ => 0,
+            },
+            thickness: {
+                let thickness = style
+                    .text_decoration_thickness
+                    .resolve(size, 0.0, root_font_px);
+                if thickness > 0.0 {
+                    thickness
+                } else {
+                    (size / 12.0).max(1.0)
+                }
+            },
+            underline_offset: style.text_underline_offset.resolve(size, 0.0, root_font_px),
+            underline_position: style.text_underline_position,
+            skip_ink: !style.text_decoration_skip_ink.eq_ignore_ascii_case("none"),
+        },
+    }
+}
+
 fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32, root_font_px: f32) {
     let tag = node.tag.as_str();
     let input_type = node
@@ -3923,7 +4065,11 @@ fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32, 
         return;
     }
 
-    let cr = node.layout.content_rect;
+    let mut cr = node.layout.content_rect;
+    if tag == "textarea" {
+        cr.x += node.scrollbar_gutter_widths().0;
+        cr.w = node.scrollport_content_width();
+    }
     let font_px = node.style.font_size_px(root_font_px, root_font_px).max(1.0);
     let value = if tag == "select" {
         // The shown text is "the label of an option of which selectedness is
@@ -3977,6 +4123,27 @@ fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32, 
         (Vec::new(), -1, Vec::new())
     };
 
+    let text_selection = node.style.selection_style.as_ref().and_then(|style| {
+        if !crate::types::is_text_input(node) || node.input_cursor == node.input_sel_anchor {
+            return None;
+        }
+        let display_offset = |offset: usize| {
+            let prefix: String = value.chars().take(offset).collect();
+            if input_type == "password" {
+                prefix.chars().count()
+            } else {
+                apply_text_transform(&prefix, node.style.text_transform)
+                    .chars()
+                    .count()
+            }
+        };
+        Some(super::display_list::ControlTextSelection {
+            range: display_offset(node.input_cursor.min(node.input_sel_anchor))
+                ..display_offset(node.input_cursor.max(node.input_sel_anchor)),
+            background: style.background_color,
+            foreground: style.color,
+        })
+    });
     list.push(PaintCmd::FormElement {
         tag: tag.to_string(),
         input_type: input_type.to_string(),
@@ -4003,56 +4170,18 @@ fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32, 
                 c.a = (c.a as f32 * 0.5) as u8;
                 c
             }),
-        placeholder_typography: node.style.placeholder_style.as_ref().map(|style| {
-            let size = style.font_size_px(font_px, root_font_px).max(1.0);
-            PlaceholderTypography {
-                opacity: style.opacity,
-                font_size: size,
-                font_weight: style.font_weight.value(),
-                font_style: match style.font_style {
-                    FontStyle::Italic => 1,
-                    FontStyle::Oblique => 2,
-                    _ => 0,
-                },
-                font_family: style.font_family.clone(),
-                font_stretch: style.font_stretch,
-                line_height: style
-                    .line_height
-                    .resolve(size, 0.0, root_font_px)
-                    .max(size * 1.2),
-                letter_spacing: style.letter_spacing.resolve(size, 0.0, root_font_px),
-                word_spacing: style.word_spacing.resolve(size, 0.0, root_font_px),
-                text_transform: style.text_transform,
-                shadow: style.text_shadow.clone(),
-                decoration: TextDecoration {
-                    underline: style.text_decoration.underline,
-                    overline: style.text_decoration.overline,
-                    strikethrough: style.text_decoration.strikethrough,
-                    color: style.text_decoration_color.unwrap_or(style.color),
-                    style: match style.text_decoration_style {
-                        TextDecorationStyle::Double => 1,
-                        TextDecorationStyle::Dotted => 2,
-                        TextDecorationStyle::Dashed => 3,
-                        TextDecorationStyle::Wavy => 4,
-                        _ => 0,
-                    },
-                    thickness: {
-                        let thickness =
-                            style
-                                .text_decoration_thickness
-                                .resolve(size, 0.0, root_font_px);
-                        if thickness > 0.0 {
-                            thickness
-                        } else {
-                            (size / 12.0).max(1.0)
-                        }
-                    },
-                    underline_offset: style.text_underline_offset.resolve(size, 0.0, root_font_px),
-                    underline_position: style.text_underline_position,
-                    skip_ink: !style.text_decoration_skip_ink.eq_ignore_ascii_case("none"),
-                },
-            }
-        }),
+        value_typography: Some(Box::new(native_control_typography(
+            node,
+            &node.style,
+            root_font_px,
+            root_font_px,
+            cr.w,
+        ))),
+        placeholder_typography: node
+            .style
+            .placeholder_style
+            .as_ref()
+            .map(|style| native_control_typography(node, style, font_px, root_font_px, cr.w)),
         file_button_color: node
             .style
             .file_selector_button_style
@@ -4087,6 +4216,7 @@ fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32, 
         value,
         placeholder,
         input_cursor: node.input_cursor,
+        text_selection,
         appearance_none: node.style.appearance == "none",
         vertical: !matches!(
             node.style.writing_mode,
@@ -4095,6 +4225,7 @@ fn build_form_element(node: &WebCore, list: &mut DisplayList, sx: f32, sy: f32, 
         options,
         selected,
         selected_all,
+        content_scroll: (node.layout.scroll_left, node.layout.scroll_top),
     });
 }
 

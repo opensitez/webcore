@@ -17,6 +17,108 @@ fn parse_and_layout(html: &str) -> Document {
     doc
 }
 
+#[test]
+fn focus_changes_preserve_hover_and_defer_styles_until_cssom_read() {
+    let mut doc = parse_and_layout(
+        "<style>button:focus{color:red}form:focus-within{background:blue}</style><form id=f><button id=a>A</button><button id=b>B</button></form>",
+    );
+    let a = doc.get_element_by_id("a").unwrap();
+    let b = doc.get_element_by_id("b").unwrap();
+    let f = doc.get_element_by_id("f").unwrap();
+    doc.hovered_box = a;
+    let generation = doc.layout_generation;
+    let before = doc.get_node(a).unwrap().style.color;
+    assert!(doc.focus_next());
+    assert!(doc.focus_next());
+    assert_eq!(doc.focused_box, b);
+    assert_eq!(doc.hovered_box, a);
+    assert_eq!(doc.layout_generation, generation);
+    assert_eq!(doc.get_node(a).unwrap().style.color, before);
+    assert!(doc.style_dirty);
+    assert_eq!(doc.computed_style_property(b, "color"), "rgb(255, 0, 0)");
+    assert_eq!(
+        doc.computed_style_property(f, "background-color"),
+        "rgb(0, 0, 255)"
+    );
+    assert!(!doc.style_dirty);
+    assert_eq!(doc.layout_generation, generation + 1);
+}
+
+#[test]
+fn dom_focus_and_blur_dispatch_once_with_related_targets() {
+    use std::sync::{Arc, Mutex};
+    let mut doc = parse_and_layout("<button id=a>A</button><button id=b>B</button>");
+    let a = doc.get_element_by_id("a").unwrap();
+    let b = doc.get_element_by_id("b").unwrap();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    for id in [a, b] {
+        for kind in ["focus", "focusin", "blur", "focusout"] {
+            let observed = log.clone();
+            doc.add_event_listener(
+                id,
+                kind,
+                Box::new(move |event, _| {
+                    assert!(event.is_trusted);
+                    observed.lock().unwrap().push((
+                        event.event_type.clone(),
+                        event.target,
+                        event.related_target,
+                    ));
+                }),
+                crate::dom::events::ListenerOptions::default(),
+            );
+        }
+    }
+    doc.focus(a);
+    doc.focus(a);
+    doc.focus(b);
+    doc.blur(b);
+    assert_eq!(doc.focused_box, 0);
+    let expected = [
+        ("focus", a, 0),
+        ("focusin", a, 0),
+        ("blur", a, b),
+        ("focusout", a, b),
+        ("focus", b, a),
+        ("focusin", b, a),
+        ("blur", b, 0),
+        ("focusout", b, 0),
+    ];
+    assert_eq!(
+        *log.lock().unwrap(),
+        expected
+            .map(|(kind, id, related)| (kind.to_string(), id, related))
+            .to_vec()
+    );
+}
+
+#[test]
+fn blur_listener_focus_redirect_does_not_focus_the_stale_target() {
+    let mut doc =
+        parse_and_layout("<button id=a>A</button><button id=b>B</button><button id=c>C</button>");
+    let a = doc.get_element_by_id("a").unwrap();
+    let b = doc.get_element_by_id("b").unwrap();
+    let c = doc.get_element_by_id("c").unwrap();
+    doc.focus(a);
+    doc.add_event_listener(
+        a,
+        "blur",
+        Box::new(move |_, doc| doc.focus(c)),
+        crate::dom::events::ListenerOptions::default(),
+    );
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(0));
+    let observed = seen.clone();
+    doc.add_event_listener(
+        b,
+        "focus",
+        Box::new(move |_, _| *observed.lock().unwrap() += 1),
+        crate::dom::events::ListenerOptions::default(),
+    );
+    doc.focus(b);
+    assert_eq!(doc.focused_box, c);
+    assert_eq!(*seen.lock().unwrap(), 0);
+}
+
 // ── 1. Tab advances focus through native-focusable elements ───────────────────
 
 #[test]
@@ -238,6 +340,10 @@ fn keyboard_focused_element_has_ua_outline() {
         "focus_next must set keyboard_focus=true"
     );
 
+    let mut engine = LayoutEngine::new();
+    engine.viewport_h = doc.viewport_h;
+    engine.layout(&mut doc, 800.0);
+
     let btn = crate::dom::query_selector(&doc.root, "#btn").unwrap();
     assert!(
         btn.style.outline_width > 0.0,
@@ -334,6 +440,11 @@ fn author_can_override_focus_outline_color() {
         </style></head><body><button id=btn>B</button></body></html>"#,
     );
     doc.focus_next();
+    let id = doc.get_element_by_id("btn").unwrap();
+    assert_eq!(
+        doc.computed_style_property(id, "outline-color"),
+        "rgb(255, 0, 0)"
+    );
 
     let btn = crate::dom::query_selector(&doc.root, "#btn").unwrap();
     // Author rule overrides UA outline color to red.
@@ -352,6 +463,8 @@ fn author_can_suppress_focus_outline() {
         </style></head><body><button id=btn>B</button></body></html>"#,
     );
     doc.focus_next();
+    let id = doc.get_element_by_id("btn").unwrap();
+    assert_eq!(doc.computed_style_property(id, "outline-style"), "none");
 
     let btn = crate::dom::query_selector(&doc.root, "#btn").unwrap();
     assert_eq!(

@@ -17,6 +17,32 @@ use winit::event::{TouchPhase, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::Key;
 
+const NATIVE_CONTROL_CARET_WIDTH_PX: f32 = 1.5;
+
+fn native_control_text_rect(node: &WebCore) -> Rect {
+    let mut rect = node.layout.content_rect;
+    if node.tag == "textarea" {
+        rect.x += node.scrollbar_gutter_widths().0;
+        rect.w = node.scrollport_content_width();
+    }
+    if node.tag == "input"
+        && node.attributes.get("type").is_some_and(|kind| {
+            crate::widgets::DateKind::for_input(&kind.trim().to_ascii_lowercase()).is_some()
+        })
+    {
+        crate::widgets::DateField::text_rect(rect)
+    } else {
+        rect
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct NativeControlPaintState {
+    node_id: u32,
+    selection: Option<(usize, usize)>,
+    scroll_bits: (u32, u32),
+}
+
 pub struct Renderer {
     pub font_system: FontSystem,
     pub swash_cache: SwashCache,
@@ -50,6 +76,8 @@ pub struct Renderer {
     cached_surface_hovered_id: u32,
     cached_surface_active_id: u32,
     cached_surface_caret_visible: bool,
+    cached_native_control: Option<NativeControlPaintState>,
+    native_vertical_goal: Option<(u32, usize, u64, Option<f32>)>,
     paint_only_display_list_dirty: bool,
     pending_resource_relayout: bool,
     last_resource_relayout: Option<std::time::Instant>,
@@ -57,7 +85,6 @@ pub struct Renderer {
     last_idle_scroll_x: f32,
     last_idle_scroll_y: f32,
     dirty_paint_rects: Vec<Rect>,
-    dropdown_hover_idx: i32,
     pub content_offset_y: f32,
     /// Compositor layer tree — built after layout, used for scroll/transform/opacity.
     pub compositor: compositor::Compositor,
@@ -66,6 +93,8 @@ pub struct Renderer {
     paint_segments: Option<compositor::PaintSegments>,
     /// Whether to use tiled rendering (can be disabled for debugging).
     pub use_tiles: bool,
+    #[cfg(test)]
+    disable_opaque_occlusion: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -170,23 +199,70 @@ fn opaque_physical_fill_matches_tiny_skia() {
 }
 
 #[test]
+fn offscreen_image_publication_invalidates_retained_preview() {
+    let mut renderer = Renderer::new();
+    renderer.use_tiles = true;
+    let mut doc = renderer.load_html_vp(
+        "<style>body{margin:0}</style><div style='height:2000px'></div><img id='image' width='80' height='40'><div style='height:100px'></div>",
+        160.0, 80.0,
+    );
+    let id = doc.get_element_by_id("image").unwrap();
+    let install = |doc: &mut Document, red: u8| {
+        crate::html::set_image_on_node(
+            doc.find_webcore_mut(id).unwrap(),
+            vec![red, 0, 0, 255],
+            1,
+            1,
+        );
+    };
+    install(&mut doc, 40);
+    let rect = doc.find_webcore(id).unwrap().layout.border_rect;
+    let mut surface = Pixmap::new(160, 80).unwrap();
+    doc.scroll_y = rect.y;
+    renderer.render(&mut doc, &mut surface, 1.0);
+    assert_eq!(surface.pixel(10, 10).unwrap().red(), 40);
+    doc.scroll_y = 0.0;
+    renderer.render(&mut doc, &mut surface, 1.0);
+    install(&mut doc, 200);
+    assert!(
+        !renderer.invalidate_resource_paint_rects(&[rect]),
+        "offscreen resources must not repaint the current viewport"
+    );
+    doc.scroll_y = rect.y;
+    renderer.render(&mut doc, &mut surface, 1.0);
+    assert_eq!(
+        surface.pixel(10, 10).unwrap().red(),
+        200,
+        "scrolling back must use the final buffer, not the retained preview"
+    );
+}
+
+#[test]
 fn software_video_updates_retain_static_overlays_and_match_fresh_paint() {
     let html = r#"<style>
+        html, body { width:100%; height:100%; overflow:hidden; }
         body { margin:0; background:#234; }
         video { position:fixed; inset:0; width:100%; height:100%; object-fit:cover; }
         #overlay { position:fixed; left:20px; top:30px; color:white;
             font:20px sans-serif; text-shadow:0 2px 12px black; }
         </style><video id="video" controls></video><div id="overlay">Video overlay</div>"#;
-    for scale in [1.0, 2.0] {
+    for (opaque_background, scale) in [(false, 1.0), (false, 2.0), (true, 1.0), (true, 2.0)] {
+        let html = if opaque_background {
+            html.replace("video {", "video { background:black;")
+        } else {
+            html.to_owned()
+        };
         let mut renderer = Renderer::new();
         renderer.use_tiles = true;
-        let mut doc = renderer.load_html_vp(html, 320.0, 180.0);
+        let mut doc = renderer.load_html_vp(&html, 320.0, 180.0);
         let id = doc.get_element_by_id("video").unwrap();
         let mut actual = Pixmap::new((320.0 * scale) as u32, (180.0 * scale) as u32).unwrap();
         let mut retained_overlay = None;
         for frame in 0..3 {
             let node = doc.find_webcore_mut(id).unwrap();
-            node.image_data = Some(std::sync::Arc::new([40 + frame * 50, 100, 180, 255].repeat(64)));
+            node.image_data = Some(std::sync::Arc::new(
+                [40 + frame * 50, 100, 180, 255].repeat(64),
+            ));
             node.image_width = 8;
             node.image_height = 8;
             node.media_paused = false;
@@ -198,20 +274,141 @@ fn software_video_updates_retain_static_overlays_and_match_fresh_paint() {
                 renderer.invalidate_paint_rects([rect]);
             }
             renderer.render(&mut doc, &mut actual, scale);
-            let overlay = renderer.paint_segments.as_ref().unwrap().segments.iter()
-                .find(|segment| segment.list.commands.iter().any(|cmd| matches!(cmd,
-                    display_list::PaintCmd::TextShadow { text, .. } if text == "Video overlay")))
-                .unwrap().fixed_surface.as_ref().unwrap();
+            if opaque_background {
+                assert!(
+                    renderer
+                        .paint_segments
+                        .as_ref()
+                        .unwrap()
+                        .segments
+                        .iter()
+                        .filter(|segment| !segment.fixed)
+                        .all(|segment| segment.tiles.tiles.is_empty()),
+                    "fully hidden background was rasterized"
+                );
+            }
+            if frame != 0 {
+                let video = renderer
+                    .paint_segments
+                    .as_ref()
+                    .unwrap()
+                    .segments
+                    .iter()
+                    .find(|segment| {
+                        segment
+                            .list
+                            .commands
+                            .iter()
+                            .any(|cmd| matches!(cmd, display_list::PaintCmd::Image { .. }))
+                    })
+                    .unwrap();
+                assert_eq!(
+                    video.fixed_surface.is_none(),
+                    opaque_background,
+                    "opaque_background={opaque_background}, scale={scale}"
+                );
+            }
+            let overlay = renderer
+                .paint_segments
+                .as_ref()
+                .unwrap()
+                .segments
+                .iter()
+                .find(|segment| {
+                    segment.list.commands.iter().any(|cmd| {
+                        matches!(cmd,
+                    display_list::PaintCmd::TextShadow { text, .. } if text == "Video overlay")
+                    })
+                })
+                .unwrap()
+                .fixed_surface
+                .as_ref()
+                .unwrap();
             if let Some(previous) = retained_overlay {
-                assert_eq!(overlay.image.data().as_ptr(), previous, "static overlay was rerasterized");
+                assert_eq!(
+                    overlay.image.data().as_ptr(),
+                    previous,
+                    "static overlay was rerasterized"
+                );
             }
             retained_overlay = Some(overlay.image.data().as_ptr());
             let mut reference = Renderer::new();
             reference.use_tiles = true;
+            reference.disable_opaque_occlusion = true;
             let mut expected = Pixmap::new(actual.width(), actual.height()).unwrap();
             reference.render(&mut doc, &mut expected, scale);
-            let difference = actual.data().iter().zip(expected.data()).position(|(a, b)| a != b);
-            assert_eq!(difference, None, "frame={frame}, scale={scale}");
+            if opaque_background {
+                assert!(
+                    reference
+                        .paint_segments
+                        .as_ref()
+                        .unwrap()
+                        .segments
+                        .iter()
+                        .filter(|segment| !segment.fixed)
+                        .any(|segment| !segment.tiles.tiles.is_empty()),
+                    "reference did not paint the hidden background"
+                );
+            }
+            let difference = actual
+                .data()
+                .iter()
+                .zip(expected.data())
+                .position(|(a, b)| a != b);
+            assert_eq!(
+                difference, None,
+                "frame={frame}, scale={scale}, opaque={opaque_background}"
+            );
+        }
+    }
+}
+
+#[test]
+#[ignore = "run explicitly when measuring fullscreen software video composition"]
+fn benchmark_fullscreen_video_occlusion() {
+    let html = "<style>html,body{width:100%;height:100%;overflow:hidden}body{margin:0;background:#234}
+        video{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;background:black}
+        #overlay{position:fixed;left:20px;top:30px;color:white;font:20px sans-serif;text-shadow:0 2px 12px black}
+        </style><video id='video' controls></video><div id='overlay'>Video overlay</div>";
+    let frames = [
+        std::sync::Arc::new([40, 100, 180, 255].repeat(1920 * 1080)),
+        std::sync::Arc::new([90, 100, 180, 255].repeat(1920 * 1080)),
+    ];
+    for trial in 0..4 {
+        for disabled in if trial % 2 == 0 {
+            [true, false]
+        } else {
+            [false, true]
+        } {
+            let mut renderer = Renderer::new();
+            renderer.use_tiles = true;
+            renderer.disable_opaque_occlusion = disabled;
+            let mut doc = renderer.load_html_vp(html, 1920.0, 1080.0);
+            let id = doc.get_element_by_id("video").unwrap();
+            let mut pixels = Pixmap::new(3840, 2160).unwrap();
+            let mut total = std::time::Duration::ZERO;
+            for frame in 0..16 {
+                let node = doc.find_webcore_mut(id).unwrap();
+                node.image_data = Some(frames[frame % 2].clone());
+                node.image_width = 1920;
+                node.image_height = 1080;
+                node.media_paused = false;
+                node.media_duration = Some(20.0);
+                node.media_current_time = frame as f32;
+                let rect = node.layout.content_rect;
+                renderer.invalidate_paint_only_display_list();
+                renderer.invalidate_paint_rects([rect]);
+                let start = std::time::Instant::now();
+                renderer.render(&mut doc, &mut pixels, 2.0);
+                if frame >= 4 {
+                    total += start.elapsed();
+                }
+                std::hint::black_box(pixels.data());
+            }
+            eprintln!(
+                "fullscreen CPU composition trial={trial} occlusion={} x12: {total:?}",
+                !disabled
+            );
         }
     }
 }
@@ -560,6 +757,8 @@ impl Renderer {
             cached_surface_hovered_id: 0,
             cached_surface_active_id: 0,
             cached_surface_caret_visible: false,
+            cached_native_control: None,
+            native_vertical_goal: None,
             paint_only_display_list_dirty: false,
             pending_resource_relayout: false,
             last_resource_relayout: None,
@@ -567,12 +766,13 @@ impl Renderer {
             last_idle_scroll_x: f32::NAN,
             last_idle_scroll_y: f32::NAN,
             dirty_paint_rects: Vec::new(),
-            dropdown_hover_idx: -1,
             content_offset_y: 0.0,
             compositor: compositor::Compositor::new(),
             tile_manager: tiles::TileManager::new(),
             paint_segments: None,
             use_tiles: std::env::var_os("WEBCORE_DISABLE_TILES").is_none(),
+            #[cfg(test)]
+            disable_opaque_occlusion: false,
         }
     }
 
@@ -635,6 +835,24 @@ impl Renderer {
         self.dirty_paint_rects =
             coalesce_dirty_rects(std::mem::take(&mut self.dirty_paint_rects), viewport);
         !self.dirty_paint_rects.is_empty()
+    }
+
+    pub(crate) fn invalidate_resource_paint_rects(&mut self, rects: &[Rect]) -> bool {
+        if rects.is_empty() {
+            return false;
+        }
+        // Resource publication changes captured pixel buffers even outside the
+        // viewport. Retained tiles must not survive until a later scroll with
+        // their old preview, but offscreen damage need not paint immediately.
+        for rect in rects {
+            let rect = inflate_rect(*rect, 8.0);
+            self.tile_manager.invalidate_rect(&rect);
+            if let Some(segments) = &mut self.paint_segments {
+                segments.invalidate_rect(&rect);
+            }
+        }
+        self.invalidate_paint_only_display_list();
+        self.invalidate_paint_rects(rects.iter().copied())
     }
 
     pub(crate) fn invalidate_animation_paint_rects(
@@ -1362,6 +1580,320 @@ impl Renderer {
         self.shift_held
     }
 
+    pub(crate) fn place_native_control_caret(
+        &mut self,
+        doc: &mut Document,
+        point: (f32, f32),
+        anchor: Option<usize>,
+    ) -> bool {
+        self.native_vertical_goal = None;
+        let id = doc.focused_box;
+        let Some(node) = doc.get_node(id) else {
+            return false;
+        };
+        if (node.tag != "textarea" && (node.tag != "input" || !crate::types::is_text_input(node)))
+            || doc.is_actually_disabled(id)
+        {
+            return false;
+        }
+        let rect = native_control_text_rect(node);
+        let point = (point.0 + doc.scroll_x, point.1 + doc.scroll_y);
+        if anchor.is_none() && !rect.contains(point.0, point.1) {
+            return false;
+        }
+        let initial = ComputedStyle::INITIAL_FONT_SIZE_PX;
+        let root_font = doc.root.style.font_size_px(initial, initial);
+        let typography = display_list_builder::native_control_typography(
+            node,
+            &node.style,
+            root_font,
+            root_font,
+            rect.w,
+        );
+        let raw = crate::types::input_value(node);
+        let password = node
+            .attributes
+            .get("type")
+            .is_some_and(|value| value.eq_ignore_ascii_case("password"));
+        let display = |value: &str| {
+            if password {
+                value.chars().map(|_| '\u{2022}').collect::<String>()
+            } else {
+                display_list_builder::apply_text_transform(value, typography.text_transform)
+            }
+        };
+        let text = display(&raw);
+        let scale = self.scale.max(f32::EPSILON);
+        let width = if typography.layout.is_some() {
+            0.0
+        } else {
+            crate::layout::inline_layout::measure_text_width_fs_attrs(
+                &mut self.font_system,
+                &text,
+                typography.font_size,
+                cosmic_text::Weight(typography.font_weight),
+                match typography.font_style {
+                    1 => cosmic_text::Style::Italic,
+                    2 => cosmic_text::Style::Oblique,
+                    _ => cosmic_text::Style::Normal,
+                },
+                scale,
+                &typography.font_family,
+                crate::layout::inline_layout::stretch_from_percent(typography.font_stretch),
+            ) + typography.letter_spacing * text.chars().count().saturating_sub(1) as f32
+                + typography.word_spacing * text.chars().filter(|ch| *ch == ' ').count() as f32
+        };
+        let rtl = node.style.direction == Direction::RTL;
+        let alignment = match node.style.text_align {
+            TextAlign::Center => 0.5,
+            TextAlign::Right => 1.0,
+            TextAlign::Start if rtl => 1.0,
+            TextAlign::End if !rtl => 1.0,
+            _ => 0.0,
+        };
+        let indent = node.style.text_indent.resolve_vp(
+            typography.font_size,
+            rect.w,
+            typography.font_size,
+            0.0,
+            0.0,
+        );
+        let origin_x = rect.x
+            + if typography.layout.is_some() {
+                0.0
+            } else {
+                (rect.w - width).max(0.0) * alignment
+            }
+            + indent * if rtl { -1.0 } else { 1.0 };
+        let line_height = typography.used_line_height(
+            &mut self.font_system,
+            node.tag == "input"
+                && crate::types::input_uses_minimum_normal_line_height(
+                    node.attributes.get("type").map_or("text", String::as_str),
+                ),
+        );
+        let origin_y = rect.y
+            + if node.tag == "textarea" {
+                0.0
+            } else {
+                (rect.h - line_height).max(0.0) / 2.0
+            };
+        let Some(display_index) = display_list_replay::painted_control_hit(
+            &mut self.font_system,
+            &text,
+            &typography,
+            line_height,
+            scale,
+            (
+                point.0 - origin_x + node.layout.scroll_left,
+                point.1 - origin_y + node.layout.scroll_top,
+            ),
+        ) else {
+            return false;
+        };
+        // CSS text transforms can expand a character, while the value stays unchanged.
+        let cursor = if password || typography.text_transform == TextTransform::None {
+            display_index.min(raw.chars().count())
+        } else {
+            let boundaries: Vec<_> = std::iter::once(0)
+                .chain(raw.char_indices().map(|(at, ch)| at + ch.len_utf8()))
+                .collect();
+            boundaries
+                .partition_point(|&at| display(&raw[..at]).chars().count() < display_index)
+                .min(boundaries.len().saturating_sub(1))
+        };
+        let Some(node) = doc.get_box_by_id_mut(id) else {
+            return false;
+        };
+        node.input_cursor = cursor;
+        node.input_sel_anchor = anchor.unwrap_or(cursor).min(raw.chars().count());
+        node.input_sel_direction = if node.input_cursor < node.input_sel_anchor {
+            SelectionDirection::Backward
+        } else if node.input_cursor > node.input_sel_anchor {
+            SelectionDirection::Forward
+        } else {
+            SelectionDirection::None
+        };
+        doc.editor.caret_visible = true;
+        doc.editor.last_blink = std::time::Instant::now();
+        true
+    }
+
+    pub(crate) fn move_native_control_vertically(
+        &mut self,
+        node: &mut WebCore,
+        root_font: f32,
+        key_code: u32,
+        shift: bool,
+    ) -> bool {
+        let typography = display_list_builder::native_control_typography(
+            node,
+            &node.style,
+            root_font,
+            root_font,
+            native_control_text_rect(node).w,
+        );
+        let value = crate::types::input_value(node);
+        let display = |text: &str| {
+            display_list_builder::apply_text_transform(text, typography.text_transform)
+        };
+        let text = display(&value);
+        let cursor = display(&value.chars().take(node.input_cursor).collect::<String>())
+            .chars()
+            .count();
+        let previous = self
+            .native_vertical_goal
+            .filter(|(id, _, _, _)| *id == node.node_id)
+            .map(|(_, cursor, key, goal)| (cursor, key, goal));
+        let line_height = typography.used_line_height(&mut self.font_system, false);
+        let Some((next, key, goal)) = display_list_replay::painted_control_vertical_motion(
+            &mut self.font_system,
+            &text,
+            cursor,
+            &typography,
+            line_height,
+            self.scale.max(f32::EPSILON),
+            key_code == 40,
+            previous,
+        ) else {
+            return false;
+        };
+        node.input_cursor = if typography.text_transform == TextTransform::None {
+            next
+        } else {
+            let boundaries: Vec<_> = std::iter::once(0)
+                .chain(value.char_indices().map(|(at, ch)| at + ch.len_utf8()))
+                .collect();
+            boundaries
+                .partition_point(|&at| display(&value[..at]).chars().count() < next)
+                .min(boundaries.len().saturating_sub(1))
+        };
+        if !shift {
+            node.input_sel_anchor = node.input_cursor;
+        }
+        node.input_sel_direction = if node.input_cursor < node.input_sel_anchor {
+            SelectionDirection::Backward
+        } else if node.input_cursor > node.input_sel_anchor {
+            SelectionDirection::Forward
+        } else {
+            SelectionDirection::None
+        };
+        self.native_vertical_goal = Some((node.node_id, next, key, goal));
+        true
+    }
+
+    pub(crate) fn reset_native_vertical_goal(&mut self) {
+        self.native_vertical_goal = None;
+    }
+
+    pub(crate) fn reveal_native_control_caret(&mut self, doc: &mut Document) -> bool {
+        let id = doc.focused_box;
+        let Some(node) = doc.get_node(id) else {
+            return false;
+        };
+        if !crate::types::is_text_input(node) || doc.is_actually_disabled(id) {
+            return false;
+        }
+        let initial = ComputedStyle::INITIAL_FONT_SIZE_PX;
+        let root_font = doc.root.style.font_size_px(initial, initial);
+        let typography = display_list_builder::native_control_typography(
+            node,
+            &node.style,
+            root_font,
+            root_font,
+            native_control_text_rect(node).w,
+        );
+        let value = crate::types::input_value(node);
+        let password = node.tag == "input"
+            && node
+                .attributes
+                .get("type")
+                .is_some_and(|value| value.eq_ignore_ascii_case("password"));
+        let text = if password {
+            value.chars().map(|_| '\u{2022}').collect()
+        } else {
+            display_list_builder::apply_text_transform(&value, typography.text_transform)
+        };
+        let prefix: String = value.chars().take(node.input_cursor).collect();
+        let cursor = if password {
+            prefix.chars().count()
+        } else {
+            display_list_builder::apply_text_transform(&prefix, typography.text_transform)
+                .chars()
+                .count()
+        };
+        let line_height = typography.used_line_height(
+            &mut self.font_system,
+            node.tag == "input"
+                && crate::types::input_uses_minimum_normal_line_height(
+                    node.attributes.get("type").map_or("text", String::as_str),
+                ),
+        );
+        let scale = self.scale.max(f32::EPSILON);
+        let Some((x, y)) = display_list_replay::painted_control_cursor(
+            &mut self.font_system,
+            &text,
+            cursor,
+            &typography,
+            line_height,
+            scale,
+        ) else {
+            return false;
+        };
+        if node.tag == "input" {
+            let width = native_control_text_rect(node).w;
+            let old = node.layout.scroll_left;
+            // Reveal the entire painted caret, not just its insertion coordinate.
+            let caret_width = NATIVE_CONTROL_CARET_WIDTH_PX;
+            let next = if x < old {
+                x
+            } else if x + caret_width > old + width {
+                x + caret_width - width
+            } else {
+                old
+            }
+            .max(0.0);
+            if (next - old).abs() < f32::EPSILON {
+                return false;
+            }
+            doc.get_box_by_id_mut(id).unwrap().layout.scroll_left = next;
+            doc.note_scroll_action(id);
+            let mut event = crate::dom::events::DomEvent::new("scroll", id);
+            doc.dispatch_dom_event(&mut event);
+            return true;
+        }
+        let width = native_control_text_rect(node).w;
+        let old_left = node.layout.scroll_left;
+        let next_left = if x < old_left {
+            x
+        } else if x + NATIVE_CONTROL_CARET_WIDTH_PX > old_left + width {
+            x + NATIVE_CONTROL_CARET_WIDTH_PX - width
+        } else {
+            old_left
+        }
+        .clamp(0.0, (node.layout.scroll_width - width).max(0.0));
+        let height = node.layout.content_rect.h;
+        let old = node.layout.scroll_top;
+        let next = if y < old {
+            y
+        } else if y + line_height > old + height {
+            y + line_height - height
+        } else {
+            old
+        };
+        let next = next.clamp(0.0, (node.layout.scroll_height - height).max(0.0));
+        if (next - old).abs() < f32::EPSILON && (next_left - old_left).abs() < f32::EPSILON {
+            return false;
+        }
+        let node = doc.get_box_by_id_mut(id).unwrap();
+        node.layout.scroll_top = next;
+        node.layout.scroll_left = next_left;
+        doc.note_scroll_action(id);
+        let mut event = crate::dom::events::DomEvent::new("scroll", id);
+        doc.dispatch_dom_event(&mut event);
+        true
+    }
+
     pub fn cursor_icon(&self, doc: &crate::types::Document) -> CSSCursor {
         let hovered_id = doc.hovered_box;
         if hovered_id == 0 {
@@ -1615,6 +2147,48 @@ impl Renderer {
         let paint_top = paint_band.y;
         let paint_bottom = paint_band.bottom();
 
+        // Native selection/scroll changes must refresh retained commands,
+        // even when the value, cascade and layout generation are unchanged.
+        let control = doc
+            .get_node(doc.focused_box)
+            .filter(|node| crate::types::is_text_input(node) || node.tag == "select")
+            .map(|node| NativeControlPaintState {
+                node_id: node.node_id,
+                selection: (crate::types::is_text_input(node)
+                    && node.input_cursor != node.input_sel_anchor)
+                    .then_some((
+                        node.input_cursor.min(node.input_sel_anchor),
+                        node.input_cursor.max(node.input_sel_anchor),
+                    )),
+                scroll_bits: (
+                    node.layout.scroll_left.to_bits(),
+                    node.layout.scroll_top.to_bits(),
+                ),
+            });
+        if control != self.cached_native_control {
+            let scrolled =
+                control
+                    .zip(self.cached_native_control)
+                    .is_some_and(|(current, previous)| {
+                        current.node_id == previous.node_id
+                            && current.scroll_bits != previous.scroll_bits
+                    });
+            let damage: Vec<_> = [self.cached_native_control, control]
+                .into_iter()
+                .flatten()
+                .filter(|state| scrolled || state.selection.is_some())
+                .filter_map(|state| {
+                    doc.get_node(state.node_id)
+                        .map(|node| node.layout.border_rect)
+                })
+                .collect();
+            if !damage.is_empty() {
+                self.invalidate_paint_rects(damage);
+                self.invalidate_paint_only_display_list();
+            }
+            self.cached_native_control = control;
+        }
+
         // Check what changed since last render
         let layout_changed = doc.layout_generation != self.cached_layout_generation;
         let hover_changed = doc.hovered_box != self.cached_hovered_id
@@ -1817,8 +2391,10 @@ impl Renderer {
         if dirty_display_list_paint_only {
             if let Some(surface) = self.cached_content_surface.as_ref() {
                 let replay_start = std::time::Instant::now();
-                pixmap.data_mut().copy_from_slice(surface.data());
                 let tile_scale = scale * zoom;
+                if dirty_paint_rects.is_empty() {
+                    pixmap.data_mut().copy_from_slice(surface.data());
+                }
                 if !dirty_paint_rects.is_empty() {
                     // Refresh the retained command band as well as its damaged
                     // pixels. A transient list leaves old opacity/image commands
@@ -1865,9 +2441,17 @@ impl Renderer {
                     let retained_layers = segments.is_some()
                         && dirty_paint_rects.iter().any(|rect| {
                             viewport_clip_from_doc_rect(
-                                *rect, doc.scroll_x, doc.scroll_y, view_w, view_h,
-                            ).is_some_and(|clip| clip.w * clip.h >= view_w * view_h * 0.5)
+                                *rect,
+                                doc.scroll_x,
+                                doc.scroll_y,
+                                view_w,
+                                view_h,
+                            )
+                            .is_some_and(|clip| clip.w * clip.h >= view_w * view_h * 0.5)
                         });
+                    if !retained_layers {
+                        pixmap.data_mut().copy_from_slice(surface.data());
+                    }
                     for rect in dirty_paint_rects.iter().filter(|_| !retained_layers) {
                         if let Some(clip) = viewport_clip_from_doc_rect(
                             *rect,
@@ -2097,7 +2681,28 @@ impl Renderer {
             }
         }
 
-        if !used_dirty_surface && !used_scroll_surface {
+        let opaque_base_segment = if self.use_tiles
+            && view_w * scale * zoom >= pixmap.width() as f32
+            && view_h * scale * zoom >= pixmap.height() as f32
+        {
+            self.paint_segments.as_ref().and_then(|segments| {
+                segments.segments.iter().rposition(|segment| {
+                    segment.fixed
+                        && !segment.backdrop_dependent
+                        && !segment.has_animated_transform(&animation_transform_overrides)
+                        && segment.starts_with_opaque_viewport_base(view_w, view_h)
+                })
+            })
+        } else {
+            None
+        };
+        #[cfg(test)]
+        let opaque_base_segment = if self.disable_opaque_occlusion {
+            None
+        } else {
+            opaque_base_segment
+        };
+        if !used_dirty_surface && !used_scroll_surface && opaque_base_segment.is_none() {
             pixmap.fill(canvas_color);
         }
         if !used_dirty_surface
@@ -2108,15 +2713,29 @@ impl Renderer {
             if self.use_tiles {
                 if let Some(segments) = &mut self.paint_segments {
                     let tile_scale = scale * zoom;
-                    for segment in &mut segments.segments {
+                    // The opaque base overwrites every destination pixel, making
+                    // all preceding segments irrelevant to this composition.
+                    for segment in segments
+                        .segments
+                        .iter_mut()
+                        .skip(opaque_base_segment.unwrap_or(0))
+                    {
                         if segment.fixed {
                             let fixed_start =
                                 crate::profile::is_enabled().then(std::time::Instant::now);
+                            let direct_update = segment.direct_image_update
+                                && view_w * tile_scale >= pixmap.width() as f32
+                                && view_h * tile_scale >= pixmap.height() as f32
+                                && segment.starts_with_opaque_viewport_base(view_w, view_h);
+                            let _direct_span = direct_update
+                                .then(|| crate::profile::span(crate::profile::Phase::DirectReplay));
                             // Backdrop effects need the real destination; other fixed
                             // segments can be composited from a retained viewport layer.
                             if segment.has_animated_transform(&animation_transform_overrides)
                                 || segment.backdrop_dependent
+                                || direct_update
                             {
+                                segment.direct_image_update = false;
                                 segment.fixed_surface = None;
                                 if animation_transform_overrides.is_empty() {
                                     display_list_replay::replay_commands_with_scroll(
@@ -2150,7 +2769,6 @@ impl Renderer {
                                     if let Some(mut surface) =
                                         Pixmap::new(pixmap.width(), pixmap.height())
                                     {
-                                        surface.fill(tiny_skia::Color::TRANSPARENT);
                                         display_list_replay::replay_commands_with_scroll(
                                             &segment.list.commands,
                                             &mut surface,
@@ -2392,7 +3010,14 @@ impl Renderer {
         if doc.open_select != 0 {
             if let Some(sel_node) = doc.get_node(doc.open_select) {
                 self.scale = scale * zoom;
-                self.draw_select_dropdown(sel_node, pixmap, doc.scroll_x, doc.scroll_y);
+                self.draw_select_dropdown(
+                    sel_node,
+                    pixmap,
+                    doc.scroll_x,
+                    doc.scroll_y,
+                    doc.dropdown_hover_idx,
+                    &doc.select_popup().unwrap(),
+                );
             }
         }
         // The colour picker sits on the SAME overlay surface as the dropdown,
@@ -2403,7 +3028,7 @@ impl Renderer {
             self.draw_color_picker(doc, pixmap, doc.scroll_x, doc.scroll_y);
         }
         if doc.editor.has_selection() {
-            if let Some(caret_id) = doc.editor.caret_box {
+            for (caret_id, start, end) in doc.editor.selection_segments(&doc.root) {
                 self.scale = scale * zoom;
                 self.draw_selection_highlight(
                     &doc.root,
@@ -2411,14 +3036,16 @@ impl Renderer {
                     doc.scroll_x,
                     doc.scroll_y,
                     caret_id,
-                    doc.editor.sel_start,
-                    doc.editor.sel_end,
+                    start,
+                    end,
                 );
             }
         }
         if doc.editor.caret_visible {
             if let Some((caret_id, caret_local)) = doc.editor.caret_info() {
-                if crate::dom::is_in_contenteditable_by_id(&doc.root, caret_id) {
+                if !doc.editor.read_only
+                    || crate::dom::is_in_contenteditable_by_id(&doc.root, caret_id)
+                {
                     self.scale = scale * zoom;
                     self.draw_caret(
                         &doc.root,
@@ -2432,46 +3059,121 @@ impl Renderer {
             }
         }
         if let Some(node) = doc.get_node(doc.focused_box)
-            && node.tag == "input"
-            && crate::types::is_text_input(node)
+            && doc.editor.caret_visible
+            && node.input_cursor == node.input_sel_anchor
+            && (node.tag == "textarea"
+                || (node.tag == "input" && crate::types::is_text_input(node)))
+            && !doc.is_actually_disabled(doc.focused_box)
         {
-            let value = crate::types::input_value(node);
-            let prefix: String = value.chars().take(node.input_cursor).collect();
             let initial_font_px = ComputedStyle::INITIAL_FONT_SIZE_PX;
-            let font_px = node.style.font_size_px(initial_font_px, initial_font_px);
-            let advance = crate::layout::inline_layout::measure_text_width_fs_attrs(
-                &mut self.font_system,
-                &prefix,
-                font_px,
-                cosmic_text::Weight(node.style.font_weight.value()),
-                match node.style.font_style {
-                    FontStyle::Italic => cosmic_text::Style::Italic,
-                    FontStyle::Oblique => cosmic_text::Style::Oblique,
-                    _ => cosmic_text::Style::Normal,
-                },
-                scale * zoom,
-                &node.style.font_family,
-                crate::layout::inline_layout::stretch_from_percent(node.style.font_stretch),
+            let root_font_px = doc
+                .root
+                .style
+                .font_size_px(initial_font_px, initial_font_px);
+            let typography = display_list_builder::native_control_typography(
+                node,
+                &node.style,
+                root_font_px,
+                root_font_px,
+                native_control_text_rect(node).w,
             );
-            let rect = node.layout.content_rect;
-            let caret_x = (rect.x + 2.0 + advance).min(rect.right() - 1.0) - doc.scroll_x;
-            let caret_h = (font_px * 1.2).min(rect.h);
-            let caret_y = rect.y + (rect.h - caret_h).max(0.0) / 2.0 - doc.scroll_y;
-            let mut color = node.style.caret_color.unwrap_or(node.style.color);
-            let background = node.style.background_color;
-            if node.style.caret_color.is_none() && color == background && background.a == 255 {
-                let brightness = 299u32 * background.r as u32
-                    + 587u32 * background.g as u32
-                    + 114u32 * background.b as u32;
-                color = if brightness < 128_000 {
-                    Color::WHITE
+            let font_px = typography.font_size;
+            let value = crate::types::input_value(node);
+            let password = node
+                .attributes
+                .get("type")
+                .is_some_and(|kind| kind.eq_ignore_ascii_case("password"));
+            let displayed = |text: &str| {
+                if password {
+                    text.chars().map(|_| '\u{2022}').collect::<String>()
                 } else {
-                    Color::BLACK
-                };
-            }
+                    display_list_builder::apply_text_transform(text, typography.text_transform)
+                }
+            };
+            let prefix = displayed(&value.chars().take(node.input_cursor).collect::<String>());
+            let value = displayed(&value);
+            let mut measure = |text: &str| {
+                crate::layout::inline_layout::measure_text_width_fs_attrs(
+                    &mut self.font_system,
+                    text,
+                    font_px,
+                    cosmic_text::Weight(typography.font_weight),
+                    match typography.font_style {
+                        1 => cosmic_text::Style::Italic,
+                        2 => cosmic_text::Style::Oblique,
+                        _ => cosmic_text::Style::Normal,
+                    },
+                    scale * zoom,
+                    &typography.font_family,
+                    crate::layout::inline_layout::stretch_from_percent(typography.font_stretch),
+                ) + typography.letter_spacing * text.chars().count().saturating_sub(1) as f32
+                    + typography.word_spacing * text.chars().filter(|ch| *ch == ' ').count() as f32
+            };
+            let advance = if typography.layout.is_some() {
+                0.0
+            } else {
+                measure(&prefix)
+            };
+            let value_width = if typography.layout.is_some() || prefix == value {
+                advance
+            } else {
+                measure(&value)
+            };
+            let rect = native_control_text_rect(node);
+            let rtl = node.style.direction == crate::types::Direction::RTL;
+            let alignment = match node.style.text_align {
+                crate::types::TextAlign::Center => 0.5,
+                crate::types::TextAlign::Right => 1.0,
+                crate::types::TextAlign::Start if rtl => 1.0,
+                crate::types::TextAlign::End if !rtl => 1.0,
+                _ => 0.0,
+            };
+            let indent = node
+                .style
+                .text_indent
+                .resolve_vp(font_px, rect.w, font_px, 0.0, 0.0);
+            let text_x = rect.x
+                + if typography.layout.is_some() {
+                    0.0
+                } else {
+                    (rect.w - value_width).max(0.0) * alignment
+                }
+                + indent * if rtl { -1.0 } else { 1.0 };
+            let line_height = typography.used_line_height(
+                &mut self.font_system,
+                node.tag == "input"
+                    && crate::types::input_uses_minimum_normal_line_height(
+                        node.attributes.get("type").map_or("text", String::as_str),
+                    ),
+            );
+            let (cursor_x, cursor_y) = display_list_replay::painted_control_cursor(
+                &mut self.font_system,
+                &value,
+                prefix.chars().count(),
+                &typography,
+                line_height,
+                scale * zoom,
+            )
+            .unwrap_or((advance, 0.0));
+            let caret_x = (text_x + cursor_x - node.layout.scroll_left).clamp(
+                rect.x,
+                (rect.right() - NATIVE_CONTROL_CARET_WIDTH_PX).max(rect.x),
+            ) - doc.scroll_x;
+            let text_y = if node.tag == "textarea" {
+                rect.y
+            } else {
+                rect.y + (rect.h - line_height).max(0.0) / 2.0
+            };
+            let caret_top = text_y + cursor_y - node.layout.scroll_top;
+            let clipped_top = caret_top.max(rect.y);
+            let caret_h = ((caret_top + line_height).min(rect.bottom()) - clipped_top).max(0.0);
+            let caret_y = clipped_top - doc.scroll_y;
+            let color = node.style.caret_color.unwrap_or(node.style.color);
             let mut paint = Paint::default();
             paint.set_color(color.to_tiny_skia());
-            if let Some(caret) = SkRect::from_xywh(caret_x, caret_y, 1.5, caret_h) {
+            if let Some(caret) =
+                SkRect::from_xywh(caret_x, caret_y, NATIVE_CONTROL_CARET_WIDTH_PX, caret_h)
+            {
                 pixmap.fill_rect(
                     caret,
                     &paint,
@@ -2812,6 +3514,30 @@ impl Renderer {
         sel_end: usize,
     ) -> bool {
         if node.node_id == caret_node_id {
+            if node.layout.line_cache.is_empty() {
+                for child in &node.children {
+                    let Some((offset, limit)) =
+                        crate::layout::inline_layout::flat_text_child_range(node, child)
+                    else {
+                        continue;
+                    };
+                    let len = limit - offset;
+                    let start = sel_start.saturating_sub(offset).min(len);
+                    let end = sel_end.saturating_sub(offset).min(len);
+                    if start < end {
+                        self.draw_selection_highlight_walk(
+                            child,
+                            pixmap,
+                            sx,
+                            sy,
+                            child.node_id,
+                            start,
+                            end,
+                        );
+                    }
+                }
+                return true;
+            }
             let flat = collect_flat_text(node);
             if flat.is_empty() {
                 return true;
@@ -2990,12 +3716,17 @@ impl Renderer {
 
         // A card under the swatches: the popup has to read as a surface of its
         // own, not as colours floating on the page.
+        let inset = crate::types::PickerKind::FRAME_INSET_PX;
         paint.set_color_rgba8(250, 250, 250, 255);
-        if let Some(r) = tiny_skia::Rect::from_xywh(x - 4.0, y - 4.0, pw + 8.0, ph + 8.0) {
+        if let Some(r) =
+            tiny_skia::Rect::from_xywh(x - inset, y - inset, pw + inset * 2.0, ph + inset * 2.0)
+        {
             pixmap.fill_rect(r, &paint, ts, None);
         }
         paint.set_color_rgba8(150, 150, 150, 255);
-        if let Some(r) = tiny_skia::Rect::from_xywh(x - 4.0, y - 4.0, pw + 8.0, ph + 8.0) {
+        if let Some(r) =
+            tiny_skia::Rect::from_xywh(x - inset, y - inset, pw + inset * 2.0, ph + inset * 2.0)
+        {
             pixmap.stroke_path(
                 &tiny_skia::PathBuilder::from_rect(r),
                 &paint,
@@ -3010,11 +3741,88 @@ impl Renderer {
 
         // A calendar is the same popup with a different face: the card above
         // is already drawn, so only the contents differ.
-        if matches!(
+        let calendar_mode = matches!(
             doc.picker_kind(doc.open_picker),
-            Some(crate::types::PickerKind::Calendar)
-        ) {
+            Some(crate::types::PickerKind::Calendar | crate::types::PickerKind::Month)
+        );
+        if calendar_mode {
             self.draw_calendar(doc, pixmap, x, y);
+        }
+        if let Some((tx, ty, _, _)) = doc.time_picker_rect(doc.open_picker) {
+            let (x, y) = (tx - sx, ty - sy);
+            if let Some(draft) = doc.picker_time.as_ref() {
+                let row = crate::widgets::TimePicker::ROW;
+                let column_width =
+                    crate::widgets::Calendar::width() / crate::widgets::TimePicker::COLUMNS as f32;
+                let font_px = row * 0.55;
+                let parts = draft.parts();
+                for column in 0..crate::widgets::TimePicker::COLUMNS {
+                    let left = x + column as f32 * column_width;
+                    if column == draft.active {
+                        paint.set_color_rgba8(210, 230, 255, 255);
+                        if let Some(rect) =
+                            SkRect::from_xywh(left, y + row * 2.0, column_width, row)
+                        {
+                            pixmap.fill_rect(rect, &paint, ts, None);
+                        }
+                    }
+                    let value = if column == 3 {
+                        format!("{:03}", parts[column])
+                    } else {
+                        format!("{:02}", parts[column])
+                    };
+                    for (index, label) in [
+                        crate::widgets::TimePicker::LABELS[column],
+                        "+",
+                        value.as_str(),
+                        "-",
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
+                        self.draw_text_run(
+                            label,
+                            left + column_width * 0.1,
+                            y + row * index as f32 + row * 0.2,
+                            font_px,
+                            row,
+                            FontWeight::Normal,
+                            FontStyle::Normal,
+                            "sans-serif",
+                            CTextColor::rgb(30, 30, 30),
+                            pixmap,
+                            None,
+                        );
+                    }
+                }
+                for (index, label) in ["Clear", "Done"].into_iter().enumerate() {
+                    let color = if index == 1
+                        && !doc
+                            .time_picker_value(doc.open_picker)
+                            .is_some_and(|value| doc.picker_value_allowed(doc.open_picker, &value))
+                    {
+                        CTextColor::rgb(140, 140, 140)
+                    } else {
+                        CTextColor::rgb(30, 30, 30)
+                    };
+                    self.draw_text_run(
+                        label,
+                        x + index as f32 * column_width * 2.0 + column_width * 0.1,
+                        y + row * 4.2,
+                        font_px,
+                        row,
+                        FontWeight::Normal,
+                        FontStyle::Normal,
+                        "sans-serif",
+                        color,
+                        pixmap,
+                        None,
+                    );
+                }
+            }
+            return;
+        }
+        if calendar_mode {
             return;
         }
 
@@ -3062,10 +3870,31 @@ impl Renderer {
         let cell = crate::widgets::Calendar::CELL;
         let font_px = 12.0;
 
-        let caption = format!("{} {year}", MONTHS[(month as usize - 1).min(11)]);
+        if let Some(height) = doc.calendar_picker_height(doc.open_picker) {
+            self.draw_text_run(
+                "Clear",
+                x + cell,
+                y + height - cell + 4.0,
+                font_px,
+                font_px,
+                crate::types::FontWeight::Normal,
+                crate::types::FontStyle::Normal,
+                "sans-serif",
+                CTextColor::rgba(30, 30, 30, 255),
+                pixmap,
+                None,
+            );
+        }
+
+        let month_mode = doc.picker_kind(doc.open_picker) == Some(crate::types::PickerKind::Month);
+        let caption = if month_mode {
+            year.to_string()
+        } else {
+            format!("{} {year}", MONTHS[(month as usize - 1).min(11)])
+        };
         self.draw_text_run(
             &caption,
-            x + 6.0,
+            x + cell,
             y + 6.0,
             font_px,
             font_px,
@@ -3076,6 +3905,79 @@ impl Renderer {
             pixmap,
             None,
         );
+        for (label, left) in [
+            ("<", x),
+            (">", x + crate::widgets::Calendar::width() - cell),
+        ] {
+            self.draw_text_run(
+                label,
+                left + cell / 3.0,
+                y + 6.0,
+                font_px,
+                font_px,
+                crate::types::FontWeight::Bold,
+                crate::types::FontStyle::Normal,
+                "sans-serif",
+                CTextColor::rgba(30, 30, 30, 255),
+                pixmap,
+                None,
+            );
+        }
+        if month_mode {
+            let selected_month = doc
+                .find_webcore(doc.open_picker)
+                .map(crate::types::input_value)
+                .and_then(|value| {
+                    crate::html::temporal::month_parts(&value).map(|(y, m)| (y.to_owned(), m))
+                })
+                .filter(|(y, _)| y.parse::<i32>().ok() == Some(year))
+                .map(|(_, m)| m);
+            let width =
+                crate::widgets::Calendar::width() / crate::widgets::MonthGrid::COLUMNS as f32;
+            let row_height = crate::widgets::MonthGrid::ROW_HEIGHT;
+            let ts = tiny_skia::Transform::from_scale(self.scale, self.scale);
+            for (i, label) in MONTHS.iter().enumerate() {
+                let cx = x + (i % crate::widgets::MonthGrid::COLUMNS) as f32 * width;
+                let cy = y
+                    + crate::widgets::Calendar::HEADER
+                    + (i / crate::widgets::MonthGrid::COLUMNS) as f32 * row_height;
+                let allowed =
+                    doc.picker_value_allowed(doc.open_picker, &format!("{year:04}-{:02}", i + 1));
+                let selected = selected_month == Some(i as u32 + 1);
+                if selected {
+                    let mut paint = tiny_skia::Paint::default();
+                    paint.set_color_rgba8(0, 120, 215, 255);
+                    if let Some(rect) = tiny_skia::Rect::from_xywh(
+                        cx + 1.0,
+                        cy + 1.0,
+                        width - 2.0,
+                        row_height - 2.0,
+                    ) {
+                        pixmap.fill_rect(rect, &paint, ts, None);
+                    }
+                }
+                self.draw_text_run(
+                    &label[..3],
+                    cx + 6.0,
+                    cy + (row_height - font_px) / 2.0,
+                    font_px,
+                    font_px,
+                    crate::types::FontWeight::Normal,
+                    crate::types::FontStyle::Normal,
+                    "sans-serif",
+                    if selected {
+                        CTextColor::rgba(255, 255, 255, 255)
+                    } else if !allowed {
+                        CTextColor::rgba(150, 150, 150, 255)
+                    } else {
+                        CTextColor::rgba(30, 30, 30, 255)
+                    },
+                    pixmap,
+                    None,
+                );
+            }
+            return;
+        }
         for (i, d) in DAYS.iter().enumerate() {
             self.draw_text_run(
                 d,
@@ -3099,8 +4001,21 @@ impl Renderer {
             let index = first + day as usize - 1;
             let cx = x + (index % 7) as f32 * cell;
             let cy = y + crate::widgets::Calendar::HEADER + (index / 7) as f32 * cell;
+            let candidate = doc.calendar_value(doc.open_picker, year, month, day);
+            let allowed = candidate
+                .as_ref()
+                .is_some_and(|value| doc.picker_value_allowed(doc.open_picker, value));
+            let selected_week = doc.find_webcore(doc.open_picker).is_some_and(|node| {
+                node.attributes
+                    .get("type")
+                    .is_some_and(|kind| kind.eq_ignore_ascii_case("week"))
+                    && candidate.as_deref() == Some(crate::types::input_value(node).as_str())
+            });
             let mut ink = CTextColor::rgba(30, 30, 30, 255);
-            if selected == Some(day) {
+            if !allowed {
+                ink = CTextColor::rgba(150, 150, 150, 255);
+            }
+            if selected == Some(day) || selected_week {
                 paint.set_color_rgba8(0, 120, 215, 255);
                 if let Some(r) =
                     tiny_skia::Rect::from_xywh(cx + 1.0, cy + 1.0, cell - 2.0, cell - 2.0)
@@ -3133,196 +4048,120 @@ impl Renderer {
         }
     }
 
-    fn draw_select_dropdown(&mut self, node: &WebCore, pixmap: &mut Pixmap, sx: f32, sy: f32) {
-        let br = node.layout.border_rect;
-        let popup_x = br.x - sx;
-        let popup_y = br.y + br.h - sy;
-        let popup_w = br.w.max(150.0);
-        // Which row the open popup highlights: SELECTEDNESS, the same state the
-        // pick writes.
-        //
-        // ⛔ `Option`, not a sentinel. `usize::MAX` is already taken — it is
-        // what an OPTGROUP HEADER carries as its index below — so spelling
-        // "nothing selected" that way would make every group header compare
-        // equal to the selection.
-        let selected_idx: Option<usize> = match crate::html::forms::selected_index(node) {
-            i if i >= 0 => Some(i as usize),
-            _ => None,
-        };
-        struct DropdownItem<'a> {
-            node: &'a WebCore,
-            is_group: bool,
-            text: String,
-            index: usize,
-        }
-        let mut items: Vec<DropdownItem> = Vec::new();
-        let mut opt_idx = 0usize;
-        for child in &node.children {
-            if child.tag == "option" {
-                // The option's LABEL, which HTML §4.11.3.5 defines over DESCENDANT text —
-                // so a label wrapped in an element still reads. Collecting direct
-                // `#text` children only is what made those entries blank.
-                let text: String = crate::renderer::display_list_builder::option_label(child);
-                items.push(DropdownItem {
-                    node: child,
-                    is_group: false,
-                    text: text.trim().to_string(),
-                    index: opt_idx,
-                });
-                opt_idx += 1;
-            } else if child.tag == "optgroup" {
-                let label = child.attributes.get("label").cloned().unwrap_or_default();
-                items.push(DropdownItem {
-                    node: child,
-                    is_group: true,
-                    text: label,
-                    index: usize::MAX,
-                });
-                for gc in &child.children {
-                    if gc.tag == "option" {
-                        let text: String = crate::renderer::display_list_builder::option_label(gc);
-                        items.push(DropdownItem {
-                            node: gc,
-                            is_group: false,
-                            text: text.trim().to_string(),
-                            index: opt_idx,
-                        });
-                        opt_idx += 1;
-                    }
-                }
-            }
-        }
-        if items.is_empty() {
+    fn draw_select_dropdown(
+        &mut self,
+        node: &WebCore,
+        pixmap: &mut Pixmap,
+        sx: f32,
+        sy: f32,
+        hovered_index: i32,
+        popup: &crate::types::select_popup::SelectPopup<'_>,
+    ) {
+        use crate::types::select_popup::SELECT_POPUP_PADDING;
+        let rect = Rect::new(
+            popup.rect.x - sx,
+            popup.rect.y - sy,
+            popup.rect.w,
+            popup.rect.h,
+        );
+        let Some(bounds) = SkRect::from_xywh(rect.x, rect.y, rect.w, rect.h) else {
             return;
-        }
-        let font_px = node.style.font_size_px(16.0, 16.0);
-        let item_h = font_px * 1.8;
-        let group_h = font_px * 1.5;
-        let padding = 4.0;
-        let total_h: f32 = items
-            .iter()
-            .map(|i| if i.is_group { group_h } else { item_h })
-            .sum::<f32>()
-            + padding * 2.0;
+        };
+        let transform = Transform::from_scale(self.scale, self.scale);
         let mut paint = Paint::default();
-        paint.set_color_rgba8(0, 0, 0, 50);
-        if let Some(r) = tiny_skia::Rect::from_xywh(
-            (popup_x + 3.0) * self.scale,
-            (popup_y + 3.0) * self.scale,
-            popup_w * self.scale,
-            total_h * self.scale,
-        ) {
-            pixmap.fill_rect(r, &paint, Transform::identity(), None);
-        }
-        paint.set_color_rgba8(255, 255, 255, 252);
-        if let Some(r) = tiny_skia::Rect::from_xywh(
-            popup_x * self.scale,
-            popup_y * self.scale,
-            popup_w * self.scale,
-            total_h * self.scale,
-        ) {
-            pixmap.fill_rect(r, &paint, Transform::identity(), None);
-        }
+        let background = if node.style.background_color.a > 0 {
+            node.style.background_color
+        } else {
+            Color::WHITE
+        };
+        paint.set_color(background.to_tiny_skia());
+        pixmap.fill_path(
+            &PathBuilder::from_rect(bounds),
+            &paint,
+            FillRule::Winding,
+            transform,
+            None,
+        );
         self.stroke_rect(
             pixmap,
-            popup_x,
-            popup_y,
-            popup_w,
-            total_h,
+            rect.x,
+            rect.y,
+            rect.w,
+            rect.h,
             [180, 180, 180, 255],
             1.0,
             None,
         );
-        let mut y = popup_y + padding;
-        for item in &items {
-            if item.is_group {
-                paint.set_color_rgba8(245, 245, 245, 255);
-                if let Some(r) = tiny_skia::Rect::from_xywh(
-                    (popup_x + 1.0) * self.scale,
-                    y * self.scale,
-                    (popup_w - 2.0) * self.scale,
-                    group_h * self.scale,
-                ) {
-                    pixmap.fill_rect(r, &paint, Transform::identity(), None);
-                }
-                let label_y = y + (group_h - font_px * 1.2) / 2.0;
-                self.draw_text_run(
-                    &item.text,
-                    popup_x + 8.0,
-                    label_y,
-                    font_px * 0.85,
-                    font_px,
-                    crate::types::FontWeight::Bold,
-                    node.style.font_style,
-                    &node.style.font_family,
-                    CTextColor::rgba(100, 100, 100, 255),
-                    pixmap,
-                    None,
-                );
-                y += group_h;
-            } else {
-                let is_selected = selected_idx == Some(item.index);
-                let is_hovered = item.index as i32 == self.dropdown_hover_idx;
-                let opt_bg = item.node.style.background_color;
-                let opt_color = item.node.style.color;
-                if is_selected {
-                    paint.set_color_rgba8(66, 133, 244, 255);
-                    if let Some(r) = tiny_skia::Rect::from_xywh(
-                        (popup_x + 1.0) * self.scale,
-                        y * self.scale,
-                        (popup_w - 2.0) * self.scale,
-                        item_h * self.scale,
-                    ) {
-                        pixmap.fill_rect(r, &paint, Transform::identity(), None);
-                    }
-                } else if is_hovered {
-                    paint.set_color_rgba8(229, 239, 255, 255);
-                    if let Some(r) = tiny_skia::Rect::from_xywh(
-                        (popup_x + 1.0) * self.scale,
-                        y * self.scale,
-                        (popup_w - 2.0) * self.scale,
-                        item_h * self.scale,
-                    ) {
-                        pixmap.fill_rect(r, &paint, Transform::identity(), None);
-                    }
-                } else if opt_bg.a > 0 {
-                    paint.set_color_rgba8(opt_bg.r, opt_bg.g, opt_bg.b, opt_bg.a);
-                    if let Some(r) = tiny_skia::Rect::from_xywh(
-                        (popup_x + 1.0) * self.scale,
-                        y * self.scale,
-                        (popup_w - 2.0) * self.scale,
-                        item_h * self.scale,
-                    ) {
-                        pixmap.fill_rect(r, &paint, Transform::identity(), None);
-                    }
-                }
-                let text_color = if is_selected {
-                    CTextColor::rgba(255, 255, 255, 255)
-                } else if opt_bg.a > 0 {
-                    CTextColor::rgba(opt_color.r, opt_color.g, opt_color.b, opt_color.a)
-                } else {
-                    CTextColor::rgba(33, 33, 33, 255)
-                };
-                let text_y = y + (item_h - font_px * 1.2) / 2.0;
-                self.draw_text_run(
-                    &item.text,
-                    popup_x + 8.0,
-                    text_y,
-                    font_px,
-                    font_px * 1.2,
-                    item.node.style.font_weight,
-                    item.node.style.font_style,
-                    if item.node.style.font_family.is_empty() {
-                        &node.style.font_family
-                    } else {
-                        &item.node.style.font_family
-                    },
-                    text_color,
-                    pixmap,
-                    None,
-                );
-                y += item_h;
+        let Some(mut clip) = tiny_skia::Mask::new(pixmap.width(), pixmap.height()) else {
+            return;
+        };
+        clip.fill_path(
+            &PathBuilder::from_rect(bounds),
+            FillRule::Winding,
+            false,
+            transform,
+        );
+        let selected = crate::html::forms::selected_index(node);
+        for row in &popup.rows {
+            let y = rect.y + SELECT_POPUP_PADDING + row.top - popup.scroll;
+            if y + row.height <= rect.y || y >= rect.bottom() {
+                continue;
             }
+            let is_group = row.index.is_none();
+            let is_selected = row.index.is_some_and(|i| i as i32 == selected);
+            let is_hovered = row.index.is_some_and(|i| i as i32 == hovered_index) && !row.disabled;
+            let row_color = if is_selected {
+                Color::rgba(66, 133, 244, 255)
+            } else if is_hovered {
+                Color::rgba(229, 239, 255, 255)
+            } else {
+                row.node.style.background_color
+            };
+            paint.set_color(row_color.to_tiny_skia());
+            if let Some(row_rect) =
+                SkRect::from_xywh(rect.x + 1.0, y, (rect.w - 2.0).max(0.0), row.height)
+            {
+                pixmap.fill_rect(row_rect, &paint, transform, Some(&clip));
+            }
+            let text = if is_group {
+                row.node
+                    .attributes
+                    .get("label")
+                    .cloned()
+                    .unwrap_or_default()
+            } else {
+                crate::renderer::display_list_builder::option_label(row.node)
+            };
+            let mut color = if is_selected {
+                Color::WHITE
+            } else {
+                row.node.style.color
+            };
+            if row.disabled {
+                color.a = (color.a as f32 * 0.5) as u8;
+            }
+            let font_px = popup.font_px;
+            self.draw_text_run(
+                &text,
+                rect.x + SELECT_POPUP_PADDING * 2.0,
+                y + (row.height - font_px * 1.2) / 2.0,
+                font_px,
+                font_px * 1.2,
+                if is_group {
+                    FontWeight::Bold
+                } else {
+                    row.node.style.font_weight
+                },
+                row.node.style.font_style,
+                if row.node.style.font_family.is_empty() {
+                    &node.style.font_family
+                } else {
+                    &row.node.style.font_family
+                },
+                CTextColor::rgba(color.r, color.g, color.b, color.a),
+                pixmap,
+                Some(&clip),
+            );
         }
     }
 }

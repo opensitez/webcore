@@ -5,6 +5,26 @@ mod tests {
     use crate::tests::harness::parse_and_layout;
 
     #[test]
+    fn leading_float_negative_margin_does_not_reserve_its_border_width() {
+        let doc = parse_and_layout(
+            r#"<style>
+            body { margin:0; font:16px/20px monospace; }
+            p { margin:0 0 0 80px; }
+            #number { float:left; width:64px; margin-left:-64px; }
+            </style><p><span id=number>1</span><span id=label>Introduction</span></p>"#,
+            400.0,
+        );
+        let number = crate::tests::test_grid::find_by_id(&doc.root, "number").unwrap();
+        let label = crate::tests::test_grid::find_by_id(&doc.root, "label").unwrap();
+        assert!((number.layout.border_rect.x - 16.0).abs() < 0.5);
+        assert!(
+            (label.layout.border_rect.x - 80.0).abs() < 0.5,
+            "negative-margin float must not displace text: {:?}",
+            label.layout.border_rect
+        );
+    }
+
+    #[test]
     fn clear_accounts_for_float_inside_cached_sibling() {
         let html = r#"
             <style>

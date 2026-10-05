@@ -15,6 +15,19 @@ pub fn is_focusable_node(node: &WebCore) -> bool {
         return false;
     }
     let tag = node.tag.as_str();
+    if matches!(tag, "button" | "input" | "textarea" | "select")
+        && node.attributes.contains_key("disabled")
+    {
+        return false;
+    }
+    if tag == "input"
+        && node
+            .attributes
+            .get("type")
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("hidden"))
+    {
+        return false;
+    }
     matches!(tag, "button" | "input" | "textarea" | "select")
         || (tag == "a" && node.attributes.contains_key("href"))
         || (matches!(tag, "audio" | "video") && node.attributes.contains_key("controls"))
@@ -60,6 +73,7 @@ pub(crate) fn collect_focusable_ordered(
             .unwrap_or(false);
 
     match tabindex {
+        _ if !is_focusable_node(node) => {}
         Some(n) if n > 0 => positive.push((node.node_id, n)),
         Some(0) => normal.push(node.node_id),
         Some(_) => {} // tabindex < 0: excluded from tab order

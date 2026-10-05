@@ -318,6 +318,7 @@ impl WebCore {
 
             resolved_src: String::new(),
             image_data: None,
+            image_is_fallback: false,
             image_data_width: 0,
             image_data_height: 0,
             image_width: 0,

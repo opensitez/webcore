@@ -350,7 +350,8 @@ struct PendingFontResult {
 }
 
 const FONT_DISPLAY_FALLBACK_SWAP_PERIOD: std::time::Duration = std::time::Duration::from_secs(3);
-const FONT_DISPLAY_OPTIONAL_LOAD_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
+const FONT_DISPLAY_OPTIONAL_LOAD_PERIOD: std::time::Duration =
+    std::time::Duration::from_millis(100);
 
 fn font_face_can_swap(face: &crate::css::FontFaceDecl, elapsed: std::time::Duration) -> bool {
     match face.display.as_deref() {
@@ -392,6 +393,92 @@ fn has_eot_magic(bytes: &[u8]) -> bool {
 mod font_data_tests {
     use super::is_font_data;
     use base64::Engine;
+
+    #[test]
+    fn font_face_auto_descriptors_override_native_selection_metadata() {
+        let font = include_bytes!("../tests/fixtures/fonts/bootstrap-icons-1.11.3.woff2");
+        let mut fonts = cosmic_text::FontSystem::new();
+        let ids = super::load_font_bytes(&mut fonts, std::sync::Arc::new(font.to_vec()));
+        assert!(!ids.is_empty());
+        let mut native = fonts.db().face(ids[0]).unwrap().clone();
+        native.id = fontdb::ID::dummy();
+        native.weight = fontdb::Weight::BOLD;
+        native.style = fontdb::Style::Italic;
+        native.stretch = fontdb::Stretch::Expanded;
+        let id = fonts.db_mut().push_face_info(native);
+        for (family, descriptors) in [
+            ("Omitted Descriptor Face", ""),
+            (
+                "Auto Descriptor Face",
+                "font-weight:auto;font-style:auto;font-width:auto;",
+            ),
+        ] {
+            let face = crate::css::font_face::parse_font_face_body(&format!(
+                "font-family:'{family}';src:local(Example);{descriptors}"
+            ))
+            .unwrap();
+            super::register_css_font_face_alias(&mut fonts, &face, &[id]);
+            let alias = fonts
+                .db()
+                .faces()
+                .find(|info| info.families.iter().any(|(name, _)| name == family))
+                .unwrap();
+            assert_eq!(alias.weight, fontdb::Weight::NORMAL);
+            assert_eq!(alias.style, fontdb::Style::Normal);
+            assert_eq!(alias.stretch, fontdb::Stretch::Normal);
+        }
+    }
+
+    #[test]
+    fn local_font_face_registers_one_selected_face_not_the_whole_family() {
+        let font = include_bytes!("../tests/fixtures/fonts/bootstrap-icons-1.11.3.woff2");
+        let mut fonts = cosmic_text::FontSystem::new();
+        let ids = super::load_font_bytes(&mut fonts, std::sync::Arc::new(font.to_vec()));
+        assert!(!ids.is_empty());
+        let original = fonts.db().face(ids[0]).unwrap().clone();
+        for weight in [fontdb::Weight::NORMAL, fontdb::Weight::BOLD] {
+            let mut info = original.clone();
+            info.id = fontdb::ID::dummy();
+            info.families = vec![(
+                "Local Selection Family".into(),
+                fontdb::Language::English_UnitedStates,
+            )];
+            info.weight = weight;
+            info.style = fontdb::Style::Normal;
+            info.stretch = fontdb::Stretch::Normal;
+            fonts.db_mut().push_face_info(info);
+        }
+        let face = crate::css::font_face::parse_font_face_body(
+            "font-family:'Local Selection Alias';src:local('Local Selection Family');",
+        )
+        .unwrap();
+        assert!(super::load_local_font_face(
+            &mut fonts,
+            &face,
+            "Local Selection Family"
+        ));
+        let aliases: Vec<_> = fonts
+            .db()
+            .faces()
+            .filter(|info| {
+                info.families
+                    .iter()
+                    .any(|(name, _)| name == "Local Selection Alias")
+            })
+            .collect();
+        assert_eq!(aliases.len(), 1);
+        assert_eq!(aliases[0].weight, fontdb::Weight::NORMAL);
+    }
+
+    #[test]
+    fn font_face_calculated_metrics_reach_the_font_metrics_pipeline() {
+        let face = crate::css::font_face::parse_font_face_body("font-family:Metrics;src:local(Example);size-adjust:calc(80% + 30%);ascent-override:min(90%, 95%);descent-override:calc(10% + 10%);line-gap-override:calc(2% * 5);").unwrap();
+        let metrics = super::font_face_metric_override(&face);
+        assert_eq!(metrics.size_adjust, Some(1.1));
+        assert_eq!(metrics.ascent, Some(0.9));
+        assert_eq!(metrics.descent, Some(0.2));
+        assert_eq!(metrics.line_gap, Some(0.1));
+    }
 
     #[test]
     fn document_font_loading_skips_unused_families_after_cascade() {
@@ -436,10 +523,15 @@ mod font_data_tests {
         layout.font_system = Some(&mut fonts);
         layout.layout(&mut doc, 400.0);
 
-        assert!(fonts.db().query(&fontdb::Query {
-            families: &[fontdb::Family::Name("Icon Face")],
-            ..fontdb::Query::default()
-        }).is_some());
+        assert!(
+            fonts
+                .db()
+                .query(&fontdb::Query {
+                    families: &[fontdb::Family::Name("Icon Face")],
+                    ..fontdb::Query::default()
+                })
+                .is_some()
+        );
     }
 
     #[test]
@@ -458,10 +550,15 @@ mod font_data_tests {
         layout.font_system = Some(&mut fonts);
         layout.layout(&mut doc, 400.0);
 
-        assert!(fonts.db().query(&fontdb::Query {
-            families: &[fontdb::Family::Name("Hidden Greek Face")],
-            ..fontdb::Query::default()
-        }).is_none());
+        assert!(
+            fonts
+                .db()
+                .query(&fontdb::Query {
+                    families: &[fontdb::Family::Name("Hidden Greek Face")],
+                    ..fontdb::Query::default()
+                })
+                .is_none()
+        );
     }
 
     #[test]
@@ -533,10 +630,15 @@ mod font_data_tests {
         let mut layout = super::LayoutEngine::new();
         layout.font_system = Some(&mut fonts);
         layout.layout(&mut doc, 400.0);
-        assert!(fonts.db().query(&fontdb::Query {
-            families: &[fontdb::Family::Name("Shared First Letter Face")],
-            ..fontdb::Query::default()
-        }).is_some());
+        assert!(
+            fonts
+                .db()
+                .query(&fontdb::Query {
+                    families: &[fontdb::Family::Name("Shared First Letter Face")],
+                    ..fontdb::Query::default()
+                })
+                .is_some()
+        );
     }
 
     fn uncompressed_eot(font: &[u8]) -> Vec<u8> {
@@ -578,7 +680,7 @@ mod font_data_tests {
             }
             let (raw, blocks) = body.finish().unwrap();
             assert_eq!(raw, eot);
-            assert_eq!(blocks.unwrap(), [Vec::new(), Vec::new(), Vec::new()]);
+            assert_eq!(blocks.unwrap(), [Vec::<u8>::new(), Vec::new(), Vec::new()]);
         }
     }
 
@@ -858,13 +960,14 @@ mod font_data_tests {
         .unwrap();
         engine.pending_fonts.push(rx);
         assert!(engine.poll_pending_fonts_budgeted(1, std::time::Duration::ZERO));
-        assert!(fs
-            .db()
-            .query(&fontdb::Query {
-                families: &[fontdb::Family::Name("On Time Optional")],
-                ..fontdb::Query::default()
-            })
-            .is_some());
+        assert!(
+            fs.db()
+                .query(&fontdb::Query {
+                    families: &[fontdb::Family::Name("On Time Optional")],
+                    ..fontdb::Query::default()
+                })
+                .is_some()
+        );
     }
 
     #[test]
@@ -1036,23 +1139,31 @@ mod font_data_tests {
             ..Default::default()
         };
         let first = face("First CSS Family");
-        engine.load_font_faces(std::slice::from_ref(&first), "https://example.test/page", "");
+        engine.load_font_faces(
+            std::slice::from_ref(&first),
+            "https://example.test/page",
+            "",
+        );
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while !engine.poll_pending_fonts_budgeted(1, std::time::Duration::ZERO) {
-            assert!(std::time::Instant::now() < deadline, "font task did not complete");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "font task did not complete"
+            );
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         let after_first = fs.db().len();
 
         let faces = [first, face("Later CSS Family")];
         engine.load_font_faces(&faces, "https://example.test/page", "");
-        assert!(fs
-            .db()
-            .query(&fontdb::Query {
-                families: &[fontdb::Family::Name("Later CSS Family")],
-                ..fontdb::Query::default()
-            })
-            .is_some());
+        assert!(
+            fs.db()
+                .query(&fontdb::Query {
+                    families: &[fontdb::Family::Name("Later CSS Family")],
+                    ..fontdb::Query::default()
+                })
+                .is_some()
+        );
         assert_eq!(fs.db().len(), after_first + 1);
         engine.load_font_faces(&faces, "https://example.test/page", "");
         assert_eq!(fs.db().len(), after_first + 1);
@@ -1086,13 +1197,14 @@ mod font_data_tests {
         assert!(engine.has_pending_fonts());
         assert!(engine.poll_pending_fonts_budgeted(1, std::time::Duration::ZERO));
         for family in ["First Queued Face", "Second Queued Face"] {
-            assert!(fs
-                .db()
-                .query(&fontdb::Query {
-                    families: &[fontdb::Family::Name(family)],
-                    ..fontdb::Query::default()
-                })
-                .is_some());
+            assert!(
+                fs.db()
+                    .query(&fontdb::Query {
+                        families: &[fontdb::Family::Name(family)],
+                        ..fontdb::Query::default()
+                    })
+                    .is_some()
+            );
         }
         assert!(!engine.poll_pending_fonts_budgeted(1, std::time::Duration::ZERO));
         assert!(!engine.has_pending_fonts());
@@ -1397,7 +1509,7 @@ fn load_font_bytes(
 }
 
 fn css_font_family_name(raw: &str) -> Option<String> {
-    let name = raw.trim().trim_matches('"').trim_matches('\'').trim();
+    let name = raw.trim();
     if name.is_empty() {
         None
     } else {
@@ -1406,30 +1518,47 @@ fn css_font_family_name(raw: &str) -> Option<String> {
 }
 
 fn parse_font_face_weight(raw: Option<&str>) -> Option<fontdb::Weight> {
-    let first = raw?.split_whitespace().next()?.trim().to_ascii_lowercase();
+    let first = raw
+        .unwrap_or("auto")
+        .split_whitespace()
+        .next()?
+        .trim()
+        .to_ascii_lowercase();
     match first.as_str() {
-        "normal" => Some(fontdb::Weight::NORMAL),
+        "auto" | "normal" => Some(fontdb::Weight::NORMAL),
         "bold" => Some(fontdb::Weight::BOLD),
         _ => first
-            .parse::<u16>()
+            .parse::<f32>()
             .ok()
-            .filter(|n| (1..=1000).contains(n))
-            .map(fontdb::Weight),
+            .filter(|n| {
+                (crate::css::font::MIN_FONT_WEIGHT..=crate::css::font::MAX_FONT_WEIGHT).contains(n)
+            })
+            .map(|number| fontdb::Weight(number.round() as u16)),
     }
 }
 
 fn parse_font_face_style(raw: Option<&str>) -> Option<fontdb::Style> {
-    let first = raw?.split_whitespace().next()?.trim().to_ascii_lowercase();
+    let first = raw
+        .unwrap_or("auto")
+        .split_whitespace()
+        .next()?
+        .trim()
+        .to_ascii_lowercase();
     match first.as_str() {
-        "normal" => Some(fontdb::Style::Normal),
-        "italic" => Some(fontdb::Style::Italic),
+        "auto" | "normal" => Some(fontdb::Style::Normal),
+        "italic" | "left" | "right" => Some(fontdb::Style::Italic),
         "oblique" => Some(fontdb::Style::Oblique),
         _ => None,
     }
 }
 
 fn parse_font_face_stretch(raw: Option<&str>) -> Option<fontdb::Stretch> {
-    let first = raw?.split_whitespace().next()?.trim().to_ascii_lowercase();
+    let first = raw
+        .unwrap_or("auto")
+        .split_whitespace()
+        .next()?
+        .trim()
+        .to_ascii_lowercase();
     if let Some(percent) = first.strip_suffix('%') {
         return percent
             .parse::<f32>()
@@ -1441,7 +1570,7 @@ fn parse_font_face_stretch(raw: Option<&str>) -> Option<fontdb::Stretch> {
         "extra-condensed" => Some(fontdb::Stretch::ExtraCondensed),
         "condensed" => Some(fontdb::Stretch::Condensed),
         "semi-condensed" => Some(fontdb::Stretch::SemiCondensed),
-        "normal" => Some(fontdb::Stretch::Normal),
+        "auto" | "normal" => Some(fontdb::Stretch::Normal),
         "semi-expanded" => Some(fontdb::Stretch::SemiExpanded),
         "expanded" => Some(fontdb::Stretch::Expanded),
         "extra-expanded" => Some(fontdb::Stretch::ExtraExpanded),
@@ -1572,13 +1701,10 @@ fn font_source_formats_supported(source: &crate::css::FontFaceSource) -> bool {
 }
 
 pub(crate) fn font_source_techs_supported(source: &crate::css::FontFaceSource) -> bool {
-    source.techs.is_empty()
-        || source.techs.iter().all(|tech| {
-            matches!(
-                tech.as_str(),
-                "features-opentype" | "features-aat" | "variations" | "variations-opentype"
-            )
-        })
+    source
+        .techs
+        .iter()
+        .all(|tech| crate::css::font_face::supports_font_tech(tech))
 }
 
 fn load_local_font_face(
@@ -1586,23 +1712,6 @@ fn load_local_font_face(
     face: &crate::css::FontFaceDecl,
     name: &str,
 ) -> bool {
-    if face.weight.is_none() && face.style.is_none() && face.stretch.is_none() {
-        let ids: Vec<_> = fs
-            .db()
-            .faces()
-            .filter(|candidate| {
-                candidate
-                    .families
-                    .iter()
-                    .any(|(family, _)| family.eq_ignore_ascii_case(name))
-            })
-            .map(|candidate| candidate.id)
-            .collect();
-        if !ids.is_empty() {
-            register_css_font_face_alias(fs, face, &ids);
-            return true;
-        }
-    }
     let query = fontdb::Query {
         families: &[fontdb::Family::Name(name)],
         weight: parse_font_face_weight(face.weight.as_deref()).unwrap_or(fontdb::Weight::NORMAL),
@@ -1731,8 +1840,7 @@ pub fn float_shape_reference(
         return None;
     }
     let tokens = crate::css::value_parse::split_css_values(&style.shape_outside);
-    let box_only = tokens.len() == 1
-        && crate::css::shape::shape_box_kind(&tokens[0]).is_some();
+    let box_only = tokens.len() == 1 && crate::css::shape::shape_box_kind(&tokens[0]).is_some();
     let shape_box = tokens
         .iter()
         .find_map(|token| crate::css::shape::shape_box_kind(token))
@@ -1959,7 +2067,14 @@ impl FloatContext {
             rect,
             side,
             clear: y + float_h,
-            shape: parse_float_shape(engine, shape_font_px, shape_outside, float_w, float_h, reference),
+            shape: parse_float_shape(
+                engine,
+                shape_font_px,
+                shape_outside,
+                float_w,
+                float_h,
+                reference,
+            ),
             shape_margin: shape_margin.max(0.0),
         });
         Rect::new(local_x, y, float_w, float_h)
@@ -2085,7 +2200,9 @@ fn collect_font_face_text_by_family(
                 .collect();
             cache.insert(style.font_family.clone(), matching);
         }
-        cache.get(style.font_family.as_str()).expect("font-family cached")
+        cache
+            .get(style.font_family.as_str())
+            .expect("font-family cached")
     }
 
     fn append(
@@ -2098,8 +2215,9 @@ fn collect_font_face_text_by_family(
         if text.is_empty() || style.display == Display::None {
             return;
         }
-        let transformed = (style.text_transform != crate::types::TextTransform::None)
-            .then(|| crate::renderer::display_list_builder::apply_text_transform(text, style.text_transform));
+        let transformed = (style.text_transform != crate::types::TextTransform::None).then(|| {
+            crate::renderer::display_list_builder::apply_text_transform(text, style.text_transform)
+        });
         for family in matching_families(style, wanted, family_lists) {
             let entry = out.entry(family.clone()).or_default();
             entry.push_str(text);
@@ -2165,13 +2283,20 @@ fn collect_font_face_text_by_family(
         }
     }
     if matches!(node.tag.as_str(), "input" | "textarea") {
-        if let Some(value) = node.value_state.as_ref().or_else(|| node.attributes.get("value")) {
+        if let Some(value) = node
+            .value_state
+            .as_ref()
+            .or_else(|| node.attributes.get("value"))
+        {
             append(value, &node.style, wanted, out, family_lists);
         }
         if let Some(placeholder) = node.attributes.get("placeholder") {
             append(
                 placeholder,
-                node.style.placeholder_style.as_deref().unwrap_or(&node.style),
+                node.style
+                    .placeholder_style
+                    .as_deref()
+                    .unwrap_or(&node.style),
                 wanted,
                 out,
                 family_lists,
@@ -2288,7 +2413,9 @@ fn inline_items_min_content_advance(items: &[inline_layout::InlineItem]) -> f32 
 
         segment_width += item.advance;
 
-        if item.breakable && matches!(item.kind, inline_layout::InlineItemKind::Atomic { .. }) {
+        if item.break_after
+            || (item.breakable && matches!(item.kind, inline_layout::InlineItemKind::Atomic { .. }))
+        {
             max_width = max_width.max(segment_width);
             segment_width = 0.0;
         }
@@ -2314,9 +2441,15 @@ fn shape_exclusion_x(
         FloatShape::Circle { cx, cy, r } => {
             ellipse_exclusion_x(rect, cx, cy, r, r, margin, cy.clamp(line_top, line_bottom))
         }
-        FloatShape::Ellipse { cx, cy, rx, ry } => {
-            ellipse_exclusion_x(rect, cx, cy, rx, ry, margin, cy.clamp(line_top, line_bottom))
-        }
+        FloatShape::Ellipse { cx, cy, rx, ry } => ellipse_exclusion_x(
+            rect,
+            cx,
+            cy,
+            rx,
+            ry,
+            margin,
+            cy.clamp(line_top, line_bottom),
+        ),
         FloatShape::Inset {
             top,
             right,
@@ -2334,9 +2467,11 @@ fn shape_exclusion_x(
                 )
             }
         }
-        FloatShape::RoundedBox { rect: box_rect, rx, ry } => {
-            rounded_box_exclusion_x(rect, box_rect, rx, ry, margin, line_top, line_bottom)
-        }
+        FloatShape::RoundedBox {
+            rect: box_rect,
+            rx,
+            ry,
+        } => rounded_box_exclusion_x(rect, box_rect, rx, ry, margin, line_top, line_bottom),
         FloatShape::Polygon(ref points) => {
             polygon_exclusion_x(rect, margin, points, line_top, line_bottom)
         }
@@ -2379,17 +2514,19 @@ fn rounded_box_exclusion_x(
         if y < top || y > bottom {
             continue;
         }
-        let edge_inset = |top_radius: f32, top_height: f32, bottom_radius: f32, bottom_height: f32| {
-            if top_height > 0.0 && y < shape.y + top_height {
-                let unit = ((shape.y + top_height - y) / top_height).clamp(0.0, 1.0);
-                top_radius * (1.0 - (1.0 - unit * unit).sqrt())
-            } else if bottom_height > 0.0 && y > shape.y + shape.h - bottom_height {
-                let unit = ((y - (shape.y + shape.h - bottom_height)) / bottom_height).clamp(0.0, 1.0);
-                bottom_radius * (1.0 - (1.0 - unit * unit).sqrt())
-            } else {
-                0.0
-            }
-        };
+        let edge_inset =
+            |top_radius: f32, top_height: f32, bottom_radius: f32, bottom_height: f32| {
+                if top_height > 0.0 && y < shape.y + top_height {
+                    let unit = ((shape.y + top_height - y) / top_height).clamp(0.0, 1.0);
+                    top_radius * (1.0 - (1.0 - unit * unit).sqrt())
+                } else if bottom_height > 0.0 && y > shape.y + shape.h - bottom_height {
+                    let unit =
+                        ((y - (shape.y + shape.h - bottom_height)) / bottom_height).clamp(0.0, 1.0);
+                    bottom_radius * (1.0 - (1.0 - unit * unit).sqrt())
+                } else {
+                    0.0
+                }
+            };
         left = left.min(shape.x + edge_inset(rx[0], ry[0], rx[3], ry[3]));
         right = right.max(shape.x + shape.w - edge_inset(rx[1], ry[1], rx[2], ry[2]));
     }
@@ -2499,7 +2636,12 @@ fn parse_float_shape(
             rx,
             ry,
         },
-        FloatShape::Inset { top, right, bottom, left } => FloatShape::Inset {
+        FloatShape::Inset {
+            top,
+            right,
+            bottom,
+            left,
+        } => FloatShape::Inset {
             top: top + box_rect.y,
             right: right + width - box_rect.x - box_rect.w,
             bottom: bottom + height - box_rect.y - box_rect.h,
@@ -2615,13 +2757,21 @@ fn parse_inset_shape(
     let top_token = inset_tokens[0].as_str();
     let right_token = inset_tokens.get(1).map(String::as_str).unwrap_or(top_token);
     let bottom_token = inset_tokens.get(2).map(String::as_str).unwrap_or(top_token);
-    let left_token = inset_tokens.get(3).map(String::as_str).unwrap_or(right_token);
+    let left_token = inset_tokens
+        .get(3)
+        .map(String::as_str)
+        .unwrap_or(right_token);
     let top = resolve_shape_len(engine, font_px, top_token, height)?;
     let right = resolve_shape_len(engine, font_px, right_token, width)?;
     let bottom = resolve_shape_len(engine, font_px, bottom_token, height)?;
     let left = resolve_shape_len(engine, font_px, left_token, width)?;
     if inset_count == tokens.len() {
-        return Some(FloatShape::Inset { top, right, bottom, left });
+        return Some(FloatShape::Inset {
+            top,
+            right,
+            bottom,
+            left,
+        });
     }
     let radii = tokens.get(inset_count + 1..)?.join(" ");
     let (horizontal, vertical) = crate::css::property_defs::parse_shape_round_radii(&radii)?;
@@ -2655,10 +2805,9 @@ fn parse_polygon_shape(
         }
         let coords = crate::css::split_css_shorthand_values(part);
         let start = if index == 0
-            && coords
-                .first()
-                .is_some_and(|v| v.eq_ignore_ascii_case("evenodd") || v.eq_ignore_ascii_case("nonzero"))
-        {
+            && coords.first().is_some_and(|v| {
+                v.eq_ignore_ascii_case("evenodd") || v.eq_ignore_ascii_case("nonzero")
+            }) {
             1
         } else {
             0
@@ -2758,7 +2907,12 @@ fn polygon_margin_exclusion_x(
         consider(0.0);
         consider(1.0);
         if dy != 0.0 {
-            for y in [line_top - margin, line_top, line_bottom, line_bottom + margin] {
+            for y in [
+                line_top - margin,
+                line_top,
+                line_bottom,
+                line_bottom + margin,
+            ] {
                 consider((y - y1) / dy);
             }
             let length = dx.hypot(dy);
@@ -3422,34 +3576,22 @@ impl LayoutEngine {
         } else {
             value.as_str()
         };
-        let measure = if node.tag == "textarea" {
-            text.lines()
-                .max_by_key(|line| line.chars().count())
-                .filter(|line| !line.is_empty())
-                .unwrap_or(" ")
-        } else if text.is_empty() {
-            " "
-        } else {
-            text
+        let measure = |line: &str| {
+            self.measure_text_with_css_spacing(line, font_px, &node.style, self.root_font_px)
         };
-        Some(
-            self.measure_text_cached(
-                measure,
-                font_px,
-                node.style.font_weight,
-                node.style.font_style,
-                &node.style.font_family,
-            )
-            .ceil()
-            .max(font_px),
-        )
+        let width = if node.tag == "textarea" {
+            text.split('\n').map(measure).fold(0.0, f32::max)
+        } else {
+            measure(text)
+        };
+        Some(width.ceil().max(font_px))
     }
 
     fn text_control_intrinsic_content_width(
         &self,
         node: &WebCore,
         font_px: f32,
-        root_font_px: f32,
+        _root_font_px: f32,
     ) -> Option<f32> {
         if node.tag == "select" {
             let label_width = crate::html::forms::list_of_options(node)
@@ -3465,29 +3607,84 @@ impl LayoutEngine {
                     )
                 })
                 .fold(0.0, f32::max);
-            let indicator_width = if node.style.appearance == "none" {
-                0.0
+            let indicator_width =
+                if node.style.appearance == "none" || crate::html::forms::is_list_box(node) {
+                    0.0
+                } else {
+                    crate::widgets::select::indicator_inline_size(font_px)
+                        + crate::widgets::select::label_inline_inset(font_px) * 2.0
+                };
+            let scrollbar = if crate::html::forms::is_list_box(node) {
+                node.style.scrollbar_width_px()
             } else {
-                font_px
+                0.0
             };
-            return Some(label_width + indicator_width);
+            return Some(label_width + indicator_width + scrollbar);
         }
-        if node.tag != "input" || !crate::types::is_text_input(node) {
+        if node.tag != "textarea" && (node.tag != "input" || !crate::types::is_text_input(node)) {
             return None;
         }
         if let Some(w) = self.field_sizing_content_width(node, font_px) {
             return Some(w);
         }
-        let border_box_w = node
+        let (average, maximum) = self.text_control_character_widths(node, font_px);
+        if node.tag == "textarea" {
+            return Some(
+                crate::html::forms::textarea_character_width(node) as f32 * average
+                    + node.style.scrollbar_width_px(),
+            );
+        }
+        const DEFAULT_INPUT_CHARACTER_WIDTH: u32 = 20;
+        let characters = node
             .attributes
             .get("size")
-            .and_then(|size| size.trim().parse::<f32>().ok())
-            .filter(|chars| *chars > 0.0)
-            .map(|chars| font_px * (chars * 0.6 + 0.5))
-            .unwrap_or(200.0);
-        let rb = self.res_box(&node.style, font_px, 0.0, root_font_px);
-        let edges = rb.padding_left + rb.padding_right + rb.border_left + rb.border_right;
-        Some((border_box_w - edges).max(0.0))
+            .and_then(|size| crate::html::forms::parse_non_negative_integer(size))
+            .unwrap_or(DEFAULT_INPUT_CHARACTER_WIDTH);
+        Some(((characters as f32 - 1.0) * average + maximum).max(0.0))
+    }
+
+    fn text_control_character_widths(&self, node: &WebCore, font_px: f32) -> (f32, f32) {
+        let metrics = self.font_system.and_then(|fonts| {
+            inline_layout::control_character_widths(
+                unsafe { &mut *fonts },
+                &node.style.font_family,
+                font_px,
+                node.style.font_weight,
+                node.style.font_style,
+                node.style.font_stretch,
+            )
+        });
+        // Fontless layout callers retain the engine's text-measurement fallback.
+        metrics.unwrap_or_else(|| {
+            (
+                self.measure_text_cached_with_stretch(
+                    "0",
+                    font_px,
+                    node.style.font_weight,
+                    node.style.font_style,
+                    &node.style.font_family,
+                    node.style.font_stretch,
+                ),
+                self.measure_text_cached_with_stretch(
+                    "W",
+                    font_px,
+                    node.style.font_weight,
+                    node.style.font_style,
+                    &node.style.font_family,
+                    node.style.font_stretch,
+                ),
+            )
+        })
+    }
+
+    fn text_control_line_height(&self, node: &WebCore, font_px: f32, root_font_px: f32) -> f32 {
+        if node.style.line_height.is_auto() {
+            let fonts = unsafe { self.font_system.map(|fonts| &mut *fonts) };
+            inline_layout::font_metrics(fonts, &node.style.font_family, font_px).2
+        } else {
+            self.res_len(&node.style.line_height, font_px, font_px, root_font_px)
+                .max(0.0)
+        }
     }
 
     fn field_sizing_content_height(
@@ -3495,6 +3692,7 @@ impl LayoutEngine {
         node: &WebCore,
         font_px: f32,
         root_font_px: f32,
+        width: f32,
     ) -> Option<f32> {
         if !node.style.field_sizing.eq_ignore_ascii_case("content") || !node.style.height.is_auto()
         {
@@ -3512,13 +3710,59 @@ impl LayoutEngine {
         } else {
             value.as_str()
         };
-        let line_count = text.lines().count().max(1) as f32;
-        let line_height = node
-            .style
-            .line_height
-            .resolve(font_px, font_px, root_font_px)
-            .max(font_px);
-        Some((line_count * line_height).ceil())
+        Some(
+            self.text_control_extent(node, text, width, font_px, root_font_px)
+                .1
+                .ceil(),
+        )
+    }
+
+    fn text_control_extent(
+        &self,
+        node: &WebCore,
+        text: &str,
+        width: f32,
+        font_px: f32,
+        root_font_px: f32,
+    ) -> (f32, f32) {
+        if let Some(fonts) = unsafe { self.font_system.map(|fonts| &mut *fonts) } {
+            let typography = crate::renderer::display_list_builder::native_control_typography(
+                node,
+                &node.style,
+                root_font_px,
+                root_font_px,
+                width,
+            );
+            let text = crate::renderer::display_list_builder::apply_text_transform(
+                text,
+                typography.text_transform,
+            );
+            let line_height = typography.used_line_height(fonts, false);
+            crate::renderer::display_list_replay::painted_control_extent(
+                fonts,
+                &text,
+                &typography,
+                line_height,
+                1.0,
+            )
+        } else {
+            (
+                text.split('\n')
+                    .map(|line| {
+                        self.measure_text_cached_with_stretch(
+                            line,
+                            font_px,
+                            node.style.font_weight,
+                            node.style.font_style,
+                            &node.style.font_family,
+                            node.style.font_stretch,
+                        )
+                    })
+                    .fold(0.0_f32, f32::max),
+                text.split('\n').count() as f32
+                    * self.text_control_line_height(node, font_px, root_font_px),
+            )
+        }
     }
 
     /// Resolve a box's styles using the engine's viewport dimensions.
@@ -3807,6 +4051,35 @@ impl LayoutEngine {
             }
         };
         rbox.content_width = Some(raw_w.max(min_w).min(max_w));
+    }
+
+    pub(crate) fn resolved_content_height_limits(
+        &self,
+        style: &ComputedStyle,
+        rbox: &ResolvedBox,
+        height_basis: Option<f32>,
+        font_px: f32,
+        root_font_px: f32,
+    ) -> (f32, f32) {
+        let extra = if style.box_sizing == BoxSizing::BorderBox {
+            rbox.inner_v_space()
+        } else {
+            0.0
+        };
+        let resolve = |length: &CssLength, fallback| {
+            if length.is_auto()
+                || length.is_none()
+                || height_basis.is_none() && length.has_percentage()
+            {
+                fallback
+            } else {
+                (self.res_len(length, font_px, height_basis.unwrap_or(0.0), root_font_px) - extra)
+                    .max(0.0)
+            }
+        };
+        let minimum = resolve(&style.min_height, 0.0);
+        let maximum = resolve(&style.max_height, f32::INFINITY).max(minimum);
+        (minimum, maximum)
     }
 
     /// Turn an intrinsic sizing keyword into a width — css-sizing-3 §5, §6.1.
@@ -4962,7 +5235,10 @@ impl LayoutEngine {
                             if let Some(ids) = self.loaded_remote_font_ids.get(&resolved) {
                                 register_css_font_face_alias(fs, face, ids);
                             } else {
-                                remote.entry(resolved.clone()).or_default().push(face.clone());
+                                remote
+                                    .entry(resolved.clone())
+                                    .or_default()
+                                    .push(face.clone());
                             }
                             self.scheduled_font_faces.insert(key);
                         }
@@ -5139,10 +5415,11 @@ impl LayoutEngine {
         }
 
         // A completed worker may still have an unread message in a channel.
-        if !stopped_early && self
-            .fonts_in_flight
-            .load(std::sync::atomic::Ordering::SeqCst)
-            == 0
+        if !stopped_early
+            && self
+                .fonts_in_flight
+                .load(std::sync::atomic::Ordering::SeqCst)
+                == 0
         {
             self.pending_fonts.clear();
         }
@@ -5333,7 +5610,10 @@ impl LayoutEngine {
                 || doc.has_dirty_layout())
         {
             self.cached_font_families = Some(referenced_font_face_families(&doc.root));
-            let families = self.cached_font_families.as_ref().expect("font families collected");
+            let families = self
+                .cached_font_families
+                .as_ref()
+                .expect("font families collected");
             let candidates: Vec<_> = doc
                 .stylesheet
                 .font_faces
@@ -5346,7 +5626,11 @@ impl LayoutEngine {
             if !candidates.is_empty() {
                 let ranged_families: HashSet<String> = candidates
                     .iter()
-                    .filter(|face| face.unicode_range.as_ref().is_some_and(|range| !range.trim().is_empty()))
+                    .filter(|face| {
+                        face.unicode_range
+                            .as_ref()
+                            .is_some_and(|range| !range.trim().is_empty())
+                    })
                     .filter_map(|face| css_font_family_name(&face.family))
                     .map(|name| name.to_ascii_lowercase())
                     .collect();
@@ -5365,7 +5649,10 @@ impl LayoutEngine {
                 let coverage_by_family: HashMap<_, _> = text_by_family
                     .into_iter()
                     .map(|(family, text)| {
-                        (family, crate::css::font_face::UnicodeTextCoverage::new(&text))
+                        (
+                            family,
+                            crate::css::font_face::UnicodeTextCoverage::new(&text),
+                        )
                     })
                     .collect();
                 let faces: Vec<_> = candidates
@@ -5919,9 +6206,6 @@ impl LayoutEngine {
         if let Some(w) = self.field_sizing_content_width(node, font_px) {
             rbox.content_width = Some(w);
         }
-        if let Some(h) = self.field_sizing_content_height(node, font_px, root_font_px) {
-            rbox.content_height = Some(h);
-        }
 
         // Apply intrinsic aspect ratio overrides to rbox (not to style)
         if let Some(w) = intrinsic_w_override {
@@ -6101,12 +6385,16 @@ impl LayoutEngine {
                             node.style.font_stretch,
                         )
                     }
-                    _ => 200.0,
+                    _ => self
+                        .text_control_intrinsic_content_width(node, font_px, root_font_px)
+                        .unwrap_or(200.0),
                 },
                 "select" => self
                     .text_control_intrinsic_content_width(node, font_px, root_font_px)
                     .unwrap_or(0.0),
-                "textarea" => 200.0,
+                "textarea" => self
+                    .text_control_intrinsic_content_width(node, font_px, root_font_px)
+                    .unwrap_or(0.0),
                 "progress" | "meter" => 160.0,
                 "video" | "audio" => self
                     .intrinsic_dimensions(node)
@@ -6121,15 +6409,43 @@ impl LayoutEngine {
                         Some("checkbox" | "radio")
                     ) {
                         font_px.max(13.0)
+                    } else if crate::types::input_uses_minimum_normal_line_height(
+                        node.attributes
+                            .get("type")
+                            .map(String::as_str)
+                            .unwrap_or("text"),
+                    ) {
+                        let fonts = unsafe { self.font_system.map(|fonts| &mut *fonts) };
+                        let (_, _, normal) =
+                            inline_layout::font_metrics(fonts, &node.style.font_family, font_px);
+                        if node.style.line_height.is_auto() {
+                            normal
+                        } else {
+                            self.res_len(&node.style.line_height, font_px, font_px, root_font_px)
+                                .max(normal)
+                        }
                     } else {
                         (font_px * 1.5).ceil().max(20.0)
                     }
                 }
                 "select" => {
-                    let rows = crate::html::forms::display_size(node).max(1) as f32;
-                    (font_px * 1.35 * rows).ceil().max(18.0)
+                    if crate::html::forms::is_list_box(node) {
+                        let rows = if node.style.field_sizing.eq_ignore_ascii_case("content") {
+                            crate::html::forms::option_ids(node).len().max(1) as f32
+                        } else {
+                            crate::html::forms::display_size(node).max(1) as f32
+                        };
+                        crate::html::forms::list_box_row_height(font_px) * rows
+                            + 2.0 * crate::html::forms::LIST_BOX_PADDING
+                    } else {
+                        (font_px * 1.35).ceil().max(18.0)
+                    }
                 }
-                "textarea" => (font_px * 1.35 * 2.0).ceil().max(40.0),
+                "textarea" => {
+                    crate::html::forms::textarea_character_height(node) as f32
+                        * self.text_control_line_height(node, font_px, root_font_px)
+                        + node.style.scrollbar_width_px()
+                }
                 "progress" | "meter" => 16.0,
                 "video" | "audio" => self
                     .intrinsic_dimensions(node)
@@ -6138,7 +6454,24 @@ impl LayoutEngine {
                 _ => 0.0,
             };
             let final_w = rbox.content_width.unwrap_or(fallback_w).max(0.0);
-            let final_h = rbox.content_height.unwrap_or(fallback_h).max(0.0);
+            let content_height = if c.forced_height.is_none() {
+                self.field_sizing_content_height(node, font_px, root_font_px, final_w)
+                    .map(|height| {
+                        let (minimum, maximum) = self.resolved_content_height_limits(
+                            &node.style,
+                            &rbox,
+                            c.available_height,
+                            font_px,
+                            root_font_px,
+                        );
+                        height.clamp(minimum, maximum)
+                    })
+            } else {
+                None
+            };
+            let final_h = content_height
+                .unwrap_or_else(|| rbox.content_height.unwrap_or(fallback_h))
+                .max(0.0);
             block::build_box_rects(
                 node,
                 &rbox,
@@ -6155,8 +6488,37 @@ impl LayoutEngine {
             node.layout.collapsed_margin_bottom = rbox.margin_bottom;
             node.layout.scroll_width = final_w;
             node.layout.scroll_height = final_h;
-            node.layout.scroll_left = 0.0;
-            node.layout.scroll_top = 0.0;
+            if node.tag == "select" && crate::html::forms::is_list_box(node) {
+                node.layout.scroll_height = final_h.max(
+                    crate::html::forms::option_ids(node).len() as f32
+                        * crate::html::forms::list_box_row_height(font_px)
+                        + 2.0 * crate::html::forms::LIST_BOX_PADDING,
+                );
+            } else if node.tag == "textarea" {
+                let value = crate::types::input_value(node);
+                let mut width = node.scrollport_content_width();
+                let mut extent =
+                    self.text_control_extent(node, &value, width, font_px, root_font_px);
+                node.layout.scroll_height = final_h.max(extent.1);
+                let with_gutter = node.scrollport_content_width();
+                if with_gutter < width {
+                    width = with_gutter;
+                    extent = self.text_control_extent(node, &value, width, font_px, root_font_px);
+                    node.layout.scroll_height = final_h.max(extent.1);
+                }
+                node.layout.scroll_width = width.max(extent.0);
+            }
+            if crate::html::forms::is_list_box(node) {
+                node.layout.scroll_width = node.scrollport_content_width();
+            }
+            node.layout.scroll_left = node.layout.scroll_left.clamp(
+                0.0,
+                (node.layout.scroll_width - node.scrollport_content_width()).max(0.0),
+            );
+            node.layout.scroll_top = node
+                .layout
+                .scroll_top
+                .clamp(0.0, (node.layout.scroll_height - final_h).max(0.0));
             node.layout.resolved_content_width = final_w;
             node.layout.layout_dirty = false;
             node.layout.intrinsic_dirty = false;

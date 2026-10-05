@@ -35,28 +35,38 @@ pub fn replay(list: &DisplayList, pixmap: &mut Pixmap, scale: f32) {
 }
 
 #[inline]
-pub(super) fn rgba_is_opaque(rgba: &[u8]) -> bool {
+pub(crate) fn rgba_is_opaque(rgba: &[u8]) -> bool {
+    rgba_alpha_matches::<255>(rgba)
+}
+
+pub(super) fn rgba_is_transparent(rgba: &[u8]) -> bool {
+    rgba_alpha_matches::<0>(rgba)
+}
+
+fn rgba_alpha_matches<const ALPHA: u8>(rgba: &[u8]) -> bool {
     #[cfg(target_arch = "aarch64")]
     {
-        return unsafe { rgba_is_opaque_neon(rgba) };
+        return unsafe { rgba_alpha_matches_neon::<ALPHA>(rgba) };
     }
     #[cfg(not(target_arch = "aarch64"))]
-    rgba.chunks_exact(4).all(|pixel| pixel[3] == 255)
+    rgba.chunks_exact(4).all(|pixel| pixel[3] == ALPHA)
 }
 
 #[cfg(target_arch = "aarch64")]
 #[target_feature(enable = "neon")]
-unsafe fn rgba_is_opaque_neon(rgba: &[u8]) -> bool {
+unsafe fn rgba_alpha_matches_neon<const ALPHA: u8>(rgba: &[u8]) -> bool {
     use std::arch::aarch64::*;
     let mut offset = 0;
     while offset + 64 <= rgba.len() {
         let channels = unsafe { vld4q_u8(rgba.as_ptr().add(offset)) };
-        if vminvq_u8(channels.3) != 255 {
+        if vminvq_u8(vceqq_u8(channels.3, vdupq_n_u8(ALPHA))) != 255 {
             return false;
         }
         offset += 64;
     }
-    rgba[offset..].chunks_exact(4).all(|pixel| pixel[3] == 255)
+    rgba[offset..]
+        .chunks_exact(4)
+        .all(|pixel| pixel[3] == ALPHA)
 }
 
 #[test]
@@ -64,10 +74,21 @@ fn rgba_opacity_check_covers_vector_and_tail_pixels() {
     for count in [1, 15, 16, 17, 31, 32, 33] {
         let mut pixels = vec![255; count * 4];
         assert!(rgba_is_opaque(&pixels));
+        assert!(!rgba_is_transparent(&pixels));
         for index in [0, count / 2, count - 1] {
             pixels[index * 4 + 3] = 254;
             assert!(!rgba_is_opaque(&pixels));
             pixels[index * 4 + 3] = 255;
+        }
+        for pixel in pixels.chunks_exact_mut(4) {
+            pixel[3] = 0;
+        }
+        assert!(rgba_is_transparent(&pixels));
+        assert!(!rgba_is_opaque(&pixels));
+        for index in [0, count / 2, count - 1] {
+            pixels[index * 4 + 3] = 1;
+            assert!(!rgba_is_transparent(&pixels));
+            pixels[index * 4 + 3] = 0;
         }
     }
 }
@@ -419,6 +440,224 @@ unsafe fn bilinear_opaque_eight_neon(
     unsafe { vst4_u8(destination.as_mut_ptr(), channels) };
 }
 
+#[cfg(target_arch = "aarch64")]
+struct HorizontalBilinearBlock {
+    source_x: usize,
+    weights: [u16; 8],
+    indices: [[u8; 16]; 3],
+}
+
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+unsafe fn interpolate_horizontal_eight_neon(
+    source: &[u8],
+    offset: usize,
+    block: &HorizontalBilinearBlock,
+    output: &mut [[u16; 3]],
+) {
+    use std::arch::aarch64::*;
+    // The planner bounds both taps of every lane within these 12 source pixels.
+    unsafe {
+        let table = uint8x16x3_t(
+            vld1q_u8(source.as_ptr().add(offset)),
+            vld1q_u8(source.as_ptr().add(offset + 16)),
+            vld1q_u8(source.as_ptr().add(offset + 32)),
+        );
+        let weights = vld1q_u16(block.weights.as_ptr());
+        let inverse = vsubq_u16(vdupq_n_u16(256), weights);
+        let channel = |index: usize| {
+            let samples = vqtbl3q_u8(table, vld1q_u8(block.indices[index].as_ptr()));
+            vmlaq_u16(
+                vmulq_u16(vmovl_u8(vget_low_u8(samples)), inverse),
+                vmovl_u8(vget_high_u8(samples)),
+                weights,
+            )
+        };
+        vst3q_u16(
+            output.as_mut_ptr().cast(),
+            uint16x8x3_t(channel(0), channel(1), channel(2)),
+        );
+    }
+}
+
+#[inline]
+fn horizontal_rgb_sample(left: u32, right: u32, weight: u32) -> [u16; 3] {
+    // R and B occupy independent 16-bit lanes. Each weighted sum is at
+    // most 255 * 256, so neither multiplication nor addition crosses lanes.
+    let rb = (left & 0x00ff00ff) * (256 - weight) + (right & 0x00ff00ff) * weight;
+    let green = ((left >> 8) & 255) * (256 - weight) + ((right >> 8) & 255) * weight;
+    [rb as u16, green as u16, (rb >> 16) as u16]
+}
+
+#[test]
+fn packed_horizontal_rgb_matches_independent_channels() {
+    for index in 0..1024u32 {
+        let left = index.wrapping_mul(0x9e3779b9);
+        let right = !left.rotate_left(13);
+        for weight in 0..=256 {
+            let expected = std::array::from_fn(|channel| {
+                (((left >> (channel * 8)) & 255) * (256 - weight)
+                    + ((right >> (channel * 8)) & 255) * weight) as u16
+            });
+            assert_eq!(horizontal_rgb_sample(left, right, weight), expected);
+        }
+    }
+}
+
+const SCALER_PLAN_BYTES: usize = 1024 * 1024;
+const SCALER_PLAN_ENTRIES: usize = 8;
+const SCALER_SCRATCH_COLUMNS: usize = 16 * 1024;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ScalerPlanKey {
+    width: u32,
+    origin: u32,
+    scale: u32,
+    start: usize,
+    end: usize,
+    vector: bool,
+}
+
+struct ScalerPlan {
+    columns: Vec<(usize, u32)>,
+    #[cfg(target_arch = "aarch64")]
+    horizontal_blocks: Option<Vec<HorizontalBilinearBlock>>,
+}
+
+impl ScalerPlan {
+    fn bytes(&self) -> usize {
+        let bytes = self.columns.capacity() * std::mem::size_of::<(usize, u32)>();
+        #[cfg(target_arch = "aarch64")]
+        let bytes = bytes
+            + self.horizontal_blocks.as_ref().map_or(0, |blocks| {
+                blocks.capacity() * std::mem::size_of::<HorizontalBilinearBlock>()
+            });
+        bytes
+    }
+}
+
+#[derive(Default)]
+struct ScalerPlanCache {
+    entries: std::collections::VecDeque<(ScalerPlanKey, Arc<ScalerPlan>)>,
+    bytes: usize,
+}
+
+type ScalerRows = (Vec<[u16; 3]>, Vec<[u16; 3]>);
+
+thread_local! {
+    // Geometry only: neither source pixels nor mask contents are retained.
+    static SCALER_PLANS: std::cell::RefCell<ScalerPlanCache> = Default::default();
+    static SCALER_ROWS: std::cell::RefCell<ScalerRows> = Default::default();
+}
+
+fn scaler_sample(pixel: usize, origin: f32, scale: f32, limit: u32) -> (usize, u32) {
+    let position = (pixel as f32 + 0.5 - origin) / scale - 0.5;
+    let base = position.floor().clamp(0.0, (limit - 2) as f32) as usize;
+    let fraction = (position - base as f32).clamp(0.0, 1.0);
+    (base, (fraction * 256.0).round() as u32)
+}
+
+fn scaler_plan(key: ScalerPlanKey, reuse: bool) -> Arc<ScalerPlan> {
+    if reuse
+        && let Some(plan) = SCALER_PLANS.with(|slot| {
+            let mut cache = slot.borrow_mut();
+            let index = cache
+                .entries
+                .iter()
+                .position(|(stored, _)| *stored == key)?;
+            let entry = cache.entries.remove(index)?;
+            let plan = entry.1.clone();
+            cache.entries.push_front(entry);
+            Some(plan)
+        })
+    {
+        return plan;
+    }
+    let columns: Vec<_> = (key.start..key.end)
+        .map(|x| {
+            scaler_sample(
+                x,
+                f32::from_bits(key.origin),
+                f32::from_bits(key.scale),
+                key.width,
+            )
+        })
+        .collect();
+    #[cfg(target_arch = "aarch64")]
+    let horizontal_blocks = if key.vector && key.width >= 12 {
+        columns
+            .chunks_exact(8)
+            .map(|taps| {
+                let source_x = taps[0].0.min(key.width as usize - 12);
+                if taps[7].0 > source_x + 10 {
+                    return None;
+                }
+                let mut block = HorizontalBilinearBlock {
+                    source_x,
+                    weights: [0; 8],
+                    indices: [[0; 16]; 3],
+                };
+                for (lane, &(x, weight)) in taps.iter().enumerate() {
+                    block.weights[lane] = weight as u16;
+                    for channel in 0..3 {
+                        let left = ((x - source_x) * 4 + channel) as u8;
+                        block.indices[channel][lane] = left;
+                        block.indices[channel][lane + 8] = left + 4;
+                    }
+                }
+                Some(block)
+            })
+            .collect::<Option<Vec<_>>>()
+    } else {
+        None
+    };
+    let plan = Arc::new(ScalerPlan {
+        columns,
+        #[cfg(target_arch = "aarch64")]
+        horizontal_blocks,
+    });
+    if reuse && plan.bytes() <= SCALER_PLAN_BYTES {
+        SCALER_PLANS.with(|slot| {
+            let mut cache = slot.borrow_mut();
+            while cache.entries.len() >= SCALER_PLAN_ENTRIES
+                || cache.bytes + plan.bytes() > SCALER_PLAN_BYTES
+            {
+                if let Some((_, removed)) = cache.entries.pop_back() {
+                    cache.bytes -= removed.bytes();
+                }
+            }
+            cache.bytes += plan.bytes();
+            cache.entries.push_front((key, plan.clone()));
+        });
+    }
+    plan
+}
+
+fn with_scaler_rows(
+    count: usize,
+    reuse: bool,
+    paint: impl for<'a> FnOnce(&'a mut [[u16; 3]], &'a mut [[u16; 3]]),
+) {
+    let retain = reuse && count <= SCALER_SCRATCH_COLUMNS;
+    let (mut upper, mut lower) = if retain {
+        SCALER_ROWS.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
+    } else {
+        (Vec::new(), Vec::new())
+    };
+    if upper.capacity() < count {
+        upper.reserve_exact(count - upper.len());
+    }
+    if lower.capacity() < count {
+        lower.reserve_exact(count - lower.len());
+    }
+    upper.resize(count, [0; 3]);
+    lower.resize(count, [0; 3]);
+    paint(&mut upper, &mut lower);
+    if retain {
+        SCALER_ROWS.with(|slot| *slot.borrow_mut() = (upper, lower));
+    }
+}
+
 fn blit_opaque_scaled_image_impl<
     const CACHE_ROWS: bool,
     const PARALLEL: bool,
@@ -431,6 +670,46 @@ fn blit_opaque_scaled_image_impl<
     transform: Transform,
     mask: &tiny_skia::Mask,
 ) -> bool {
+    blit_opaque_scaled_image_with_clip::<CACHE_ROWS, PARALLEL, VECTOR>(
+        target,
+        rgba,
+        width,
+        height,
+        transform,
+        Some(mask),
+    )
+}
+
+fn blit_opaque_scaled_image_with_clip<
+    const CACHE_ROWS: bool,
+    const PARALLEL: bool,
+    const VECTOR: bool,
+>(
+    target: &mut Pixmap,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    transform: Transform,
+    mask: Option<&tiny_skia::Mask>,
+) -> bool {
+    blit_opaque_scaled_image_reuse::<CACHE_ROWS, PARALLEL, VECTOR, true>(
+        target, rgba, width, height, transform, mask,
+    )
+}
+
+fn blit_opaque_scaled_image_reuse<
+    const CACHE_ROWS: bool,
+    const PARALLEL: bool,
+    const VECTOR: bool,
+    const REUSE: bool,
+>(
+    target: &mut Pixmap,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    transform: Transform,
+    mask: Option<&tiny_skia::Mask>,
+) -> bool {
     if transform.kx != 0.0
         || transform.ky != 0.0
         || !transform.sx.is_finite()
@@ -441,12 +720,27 @@ fn blit_opaque_scaled_image_impl<
         || !transform.ty.is_finite()
         || width < 2
         || height < 2
-        || !rgba_is_opaque(rgba)
+        || u64::from(width)
+            .checked_mul(u64::from(height))
+            .and_then(|size| size.checked_mul(4))
+            != Some(rgba.len() as u64)
     {
         return false;
     }
     let tw = target.width() as usize;
     let th = target.height() as usize;
+    // Without a clip, keep antialiased image edges on the general painter.
+    if mask.is_none()
+        && (transform.tx > 0.0
+            || transform.ty > 0.0
+            || transform.tx + width as f32 * transform.sx < tw as f32
+            || transform.ty + height as f32 * transform.sy < th as f32)
+    {
+        return false;
+    }
+    if !rgba_is_opaque(rgba) {
+        return false;
+    }
     let x0 = (transform.tx.ceil() as i64).clamp(0, tw as i64) as usize;
     let y0 = (transform.ty.ceil() as i64).clamp(0, th as i64) as usize;
     let x1 =
@@ -456,116 +750,143 @@ fn blit_opaque_scaled_image_impl<
     if x0 >= x1 || y0 >= y1 {
         return true;
     }
-    let sample = |pixel: usize, origin: f32, scale: f32, limit: u32| {
-        let position = (pixel as f32 + 0.5 - origin) / scale - 0.5;
-        let base = position.floor().clamp(0.0, (limit - 2) as f32) as usize;
-        let fraction = (position - base as f32).clamp(0.0, 1.0);
-        (base, (fraction * 256.0).round() as u32)
-    };
-    let columns: Vec<_> = (x0..x1)
-        .map(|x| sample(x, transform.tx, transform.sx, width))
-        .collect();
-    let coverage = mask.data();
+    let plan = scaler_plan(
+        ScalerPlanKey {
+            width,
+            origin: transform.tx.to_bits(),
+            scale: transform.sx.to_bits(),
+            start: x0,
+            end: x1,
+            vector: VECTOR && CACHE_ROWS,
+        },
+        REUSE,
+    );
+    let columns = &plan.columns;
+    #[cfg(target_arch = "aarch64")]
+    let horizontal_blocks = &plan.horizontal_blocks;
+    let coverage = mask.map(tiny_skia::Mask::data);
     let pixels = target.data_mut();
     let source_stride = width as usize * 4;
     let interpolate_row = |source_y: usize, output: &mut [[u16; 3]]| {
         let source_row = source_y * source_stride;
-        for (column, &(sx, wx)) in columns.iter().enumerate() {
-            let source = source_row + sx * 4;
-            for channel in 0..3 {
-                output[column][channel] = (u32::from(rgba[source + channel]) * (256 - wx)
-                    + u32::from(rgba[source + 4 + channel]) * wx)
-                    as u16;
+        #[cfg(target_arch = "aarch64")]
+        let first_scalar = if let Some(blocks) = &horizontal_blocks {
+            for (index, block) in blocks.iter().enumerate() {
+                unsafe {
+                    interpolate_horizontal_eight_neon(
+                        rgba,
+                        source_row + block.source_x * 4,
+                        block,
+                        &mut output[index * 8..index * 8 + 8],
+                    );
+                }
             }
+            blocks.len() * 8
+        } else {
+            0
+        };
+        #[cfg(not(target_arch = "aarch64"))]
+        let first_scalar = 0;
+        for (column, &(sx, wx)) in columns.iter().enumerate().skip(first_scalar) {
+            let source = source_row + sx * 4;
+            let left = u32::from_le_bytes(rgba[source..source + 4].try_into().unwrap());
+            let right = u32::from_le_bytes(rgba[source + 4..source + 8].try_into().unwrap());
+            output[column] = horizontal_rgb_sample(left, right, wx);
         }
     };
     let paint_rows = |first_y: usize, row_pixels: &mut [u8]| {
-        let mut upper_row = vec![[0u16; 3]; columns.len()];
-        let mut lower_row = vec![[0u16; 3]; columns.len()];
-        let mut cached_source_y = None;
-        let last_y = first_y + row_pixels.len() / (tw * 4);
-        for y in y0.max(first_y)..y1.min(last_y) {
-            let (sy, wy) = sample(y, transform.ty, transform.sy, height);
-            if CACHE_ROWS && cached_source_y != Some(sy) {
-                if cached_source_y.is_some_and(|previous| previous + 1 == sy) {
-                    std::mem::swap(&mut upper_row, &mut lower_row);
-                } else {
-                    interpolate_row(sy, &mut upper_row);
-                }
-                interpolate_row(sy + 1, &mut lower_row);
-                cached_source_y = Some(sy);
-            }
-            let mut column = 0;
-            while column < columns.len() {
-                let x = x0 + column;
-                let index = y * tw + x;
-                #[cfg(target_arch = "aarch64")]
-                if VECTOR
-                    && CACHE_ROWS
-                    && column + 8 <= columns.len()
-                    && coverage[index..index + 8] == [255; 8]
-                {
-                    let destination = ((y - first_y) * tw + x) * 4;
-                    unsafe {
-                        bilinear_opaque_eight_neon(
-                            &upper_row[column..],
-                            &lower_row[column..],
-                            wy as u16,
-                            &mut row_pixels[destination..destination + 32],
-                        );
+        with_scaler_rows(
+            if CACHE_ROWS { columns.len() } else { 0 },
+            REUSE,
+            |mut upper_row, mut lower_row| {
+                let mut cached_source_y = None;
+                let last_y = first_y + row_pixels.len() / (tw * 4);
+                for y in y0.max(first_y)..y1.min(last_y) {
+                    let (sy, wy) = scaler_sample(y, transform.ty, transform.sy, height);
+                    if CACHE_ROWS && cached_source_y != Some(sy) {
+                        if cached_source_y.is_some_and(|previous| previous + 1 == sy) {
+                            std::mem::swap(&mut upper_row, &mut lower_row);
+                        } else {
+                            interpolate_row(sy, &mut upper_row);
+                        }
+                        interpolate_row(sy + 1, &mut lower_row);
+                        cached_source_y = Some(sy);
                     }
-                    column += 8;
-                    continue;
+                    let mut column = 0;
+                    while column < columns.len() {
+                        let x = x0 + column;
+                        let index = y * tw + x;
+                        #[cfg(target_arch = "aarch64")]
+                        if VECTOR
+                            && CACHE_ROWS
+                            && column + 8 <= columns.len()
+                            && coverage
+                                .is_none_or(|coverage| coverage[index..index + 8] == [255; 8])
+                        {
+                            let destination = ((y - first_y) * tw + x) * 4;
+                            unsafe {
+                                bilinear_opaque_eight_neon(
+                                    &upper_row[column..],
+                                    &lower_row[column..],
+                                    wy as u16,
+                                    &mut row_pixels[destination..destination + 32],
+                                );
+                            }
+                            column += 8;
+                            continue;
+                        }
+                        let alpha = coverage.map_or(255, |coverage| u32::from(coverage[index]));
+                        if alpha == 0 {
+                            column += 1;
+                            continue;
+                        }
+                        let destination = ((y - first_y) * tw + x) * 4;
+                        for channel in 0..3 {
+                            let (upper, lower) = if CACHE_ROWS {
+                                (
+                                    u32::from(upper_row[column][channel]),
+                                    u32::from(lower_row[column][channel]),
+                                )
+                            } else {
+                                let (sx, wx) = columns[column];
+                                let top = sy * source_stride + sx * 4;
+                                let bottom = top + source_stride;
+                                (
+                                    (u32::from(rgba[top + channel]) * (256 - wx)
+                                        + u32::from(rgba[top + 4 + channel]) * wx
+                                        + 128)
+                                        >> 8,
+                                    (u32::from(rgba[bottom + channel]) * (256 - wx)
+                                        + u32::from(rgba[bottom + 4 + channel]) * wx
+                                        + 128)
+                                        >> 8,
+                                )
+                            };
+                            let value = if CACHE_ROWS {
+                                (upper * (256 - wy) + lower * wy + 32768) >> 16
+                            } else {
+                                (upper * (256 - wy) + lower * wy + 128) >> 8
+                            };
+                            row_pixels[destination + channel] = if alpha == 255 {
+                                value as u8
+                            } else {
+                                ((value * alpha
+                                    + u32::from(row_pixels[destination + channel]) * (255 - alpha)
+                                    + 127)
+                                    / 255) as u8
+                            };
+                        }
+                        row_pixels[destination + 3] = if alpha == 255 {
+                            255
+                        } else {
+                            (alpha + u32::from(row_pixels[destination + 3]) * (255 - alpha) / 255)
+                                as u8
+                        };
+                        column += 1;
+                    }
                 }
-                let alpha = u32::from(coverage[index]);
-                if alpha == 0 {
-                    column += 1;
-                    continue;
-                }
-                let destination = ((y - first_y) * tw + x) * 4;
-                for channel in 0..3 {
-                    let (upper, lower) = if CACHE_ROWS {
-                        (
-                            u32::from(upper_row[column][channel]),
-                            u32::from(lower_row[column][channel]),
-                        )
-                    } else {
-                        let (sx, wx) = columns[column];
-                        let top = sy * source_stride + sx * 4;
-                        let bottom = top + source_stride;
-                        (
-                            (u32::from(rgba[top + channel]) * (256 - wx)
-                                + u32::from(rgba[top + 4 + channel]) * wx
-                                + 128)
-                                >> 8,
-                            (u32::from(rgba[bottom + channel]) * (256 - wx)
-                                + u32::from(rgba[bottom + 4 + channel]) * wx
-                                + 128)
-                                >> 8,
-                        )
-                    };
-                    let value = if CACHE_ROWS {
-                        (upper * (256 - wy) + lower * wy + 32768) >> 16
-                    } else {
-                        (upper * (256 - wy) + lower * wy + 128) >> 8
-                    };
-                    row_pixels[destination + channel] = if alpha == 255 {
-                        value as u8
-                    } else {
-                        ((value * alpha
-                            + u32::from(row_pixels[destination + channel]) * (255 - alpha)
-                            + 127)
-                            / 255) as u8
-                    };
-                }
-                row_pixels[destination + 3] = if alpha == 255 {
-                    255
-                } else {
-                    (alpha + u32::from(row_pixels[destination + 3]) * (255 - alpha) / 255) as u8
-                };
-                column += 1;
-            }
-        }
+            },
+        );
     };
     if PARALLEL && (x1 - x0) * (y1 - y0) >= 1_000_000 && rayon::current_num_threads() > 1 {
         pixels
@@ -576,6 +897,250 @@ fn blit_opaque_scaled_image_impl<
         paint_rows(0, pixels);
     }
     true
+}
+
+#[test]
+fn scaler_reuse_matches_uncached_for_changing_frames_clips_and_geometry() {
+    for (width, height, tw, th) in [
+        (19, 13, 37, 27),
+        (960, 540, 1280, 855),
+        (1280, 720, 3840, 2160),
+    ] {
+        let mut rgba: Vec<_> = (0..width * height)
+            .flat_map(|i| [(i * 13) as u8, (i * 7) as u8, (i * 3) as u8, 255])
+            .collect();
+        let mut mask = tiny_skia::Mask::new(tw, th).unwrap();
+        for pass in 0..if tw == 3840 { 3 } else { 6 } {
+            for pixel in rgba.chunks_exact_mut(4) {
+                pixel[pass % 3] = pixel[pass % 3].wrapping_add(37);
+            }
+            for (index, value) in mask.data_mut().iter_mut().enumerate() {
+                *value = match (index + pass) % 7 {
+                    0 => 0,
+                    1 => 123,
+                    _ => 255,
+                };
+            }
+            let transform = Transform::from_translate(-(pass as f32) * 0.25, -0.75).pre_scale(
+                tw as f32 / width as f32 + 0.5,
+                th as f32 / height as f32 + 0.5,
+            );
+            for clip in [None, Some(&mask)] {
+                let mut expected = Pixmap::new(tw, th).unwrap();
+                expected.fill(tiny_skia::Color::from_rgba8(13, 37, 73, 127));
+                let mut actual = expected.clone();
+                assert!(blit_opaque_scaled_image_reuse::<true, true, true, false>(
+                    &mut expected,
+                    &rgba,
+                    width,
+                    height,
+                    transform,
+                    clip
+                ));
+                assert!(blit_opaque_scaled_image_reuse::<true, true, true, true>(
+                    &mut actual,
+                    &rgba,
+                    width,
+                    height,
+                    transform,
+                    clip
+                ));
+                assert_eq!(
+                    actual.data(),
+                    expected.data(),
+                    "pass={pass}, width={width}, clip={}",
+                    clip.is_some()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn scaler_geometry_cache_reuses_plans_and_stays_bounded() {
+    SCALER_PLANS.with(|slot| *slot.borrow_mut() = ScalerPlanCache::default());
+    let key = ScalerPlanKey {
+        width: 1280,
+        origin: 0.0f32.to_bits(),
+        scale: 2.0f32.to_bits(),
+        start: 0,
+        end: 2560,
+        vector: true,
+    };
+    let first = scaler_plan(key, true);
+    assert!(Arc::ptr_eq(&first, &scaler_plan(key, true)));
+    for end in [SCALER_PLAN_BYTES, 2560, 4000, 8000, 16000, 32000, 64000] {
+        assert_eq!(
+            scaler_plan(ScalerPlanKey { end, ..key }, true)
+                .columns
+                .len(),
+            end
+        );
+        SCALER_PLANS.with(|slot| {
+            let cache = slot.borrow();
+            assert!(cache.bytes <= SCALER_PLAN_BYTES);
+            assert!(cache.entries.len() <= SCALER_PLAN_ENTRIES);
+            assert_eq!(
+                cache.bytes,
+                cache
+                    .entries
+                    .iter()
+                    .map(|(_, plan)| plan.bytes())
+                    .sum::<usize>()
+            );
+        });
+    }
+    with_scaler_rows(100, true, |upper, lower| {
+        upper.fill([11; 3]);
+        lower.fill([13; 3]);
+    });
+    SCALER_ROWS.with(|slot| {
+        let rows = slot.borrow();
+        assert!(rows.0.capacity() <= SCALER_SCRATCH_COLUMNS);
+        assert!(rows.1.capacity() <= SCALER_SCRATCH_COLUMNS);
+    });
+    with_scaler_rows(SCALER_SCRATCH_COLUMNS + 1, true, |_, _| {});
+    SCALER_ROWS.with(|slot| assert_eq!(slot.borrow().0.len(), 100));
+}
+
+#[test]
+#[ignore = "same-process retained versus reusable scaler ABBA benchmark"]
+fn benchmark_scaler_geometry_and_scratch_reuse() {
+    let rgba: Vec<_> = (0..1280u32 * 720)
+        .flat_map(|i| [(i * 13) as u8, (i * 7) as u8, (i * 3) as u8, 255])
+        .collect();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build()
+        .unwrap();
+    pool.install(|| {
+        for (tw, th, count) in [(3840, 2160, 20), (3840, 2346, 20)] {
+            let mut target = Pixmap::new(tw, th).unwrap();
+            let mut mask = tiny_skia::Mask::new(tw, th).unwrap();
+            mask.fill_path(
+                &PathBuilder::from_circle(tw as f32 / 2.0, th as f32 / 2.0, th as f32 / 2.0)
+                    .unwrap(),
+                FillRule::Winding,
+                true,
+                Transform::identity(),
+            );
+            let scale = (tw as f32 / 1280.0).max(th as f32 / 720.0);
+            let transform = Transform::from_translate((tw as f32 - 1280.0 * scale) / 2.0, 0.0)
+                .pre_scale(scale, scale);
+            for clip in [None, Some(&mask)] {
+                let mut expected = target.clone();
+                assert!(blit_opaque_scaled_image_reuse::<true, true, true, false>(
+                    &mut expected,
+                    &rgba,
+                    1280,
+                    720,
+                    transform,
+                    clip
+                ));
+                assert!(blit_opaque_scaled_image_reuse::<true, true, true, true>(
+                    &mut target,
+                    &rgba,
+                    1280,
+                    720,
+                    transform,
+                    clip
+                ));
+                assert_eq!(
+                    target.data(),
+                    expected.data(),
+                    "benchmark parity {tw}x{th}, clip={}",
+                    clip.is_some()
+                );
+                drop(expected);
+                for reuse in [false, true] {
+                    for _ in 0..4 {
+                        if reuse {
+                            blit_opaque_scaled_image_reuse::<true, true, true, true>(
+                                &mut target,
+                                &rgba,
+                                1280,
+                                720,
+                                transform,
+                                clip,
+                            );
+                        } else {
+                            blit_opaque_scaled_image_reuse::<true, true, true, false>(
+                                &mut target,
+                                &rgba,
+                                1280,
+                                720,
+                                transform,
+                                clip,
+                            );
+                        }
+                    }
+                }
+                for reuse in [false, true, true, false] {
+                    let start = std::time::Instant::now();
+                    for _ in 0..count {
+                        let painted = if reuse {
+                            blit_opaque_scaled_image_reuse::<true, true, true, true>(
+                                &mut target,
+                                &rgba,
+                                1280,
+                                720,
+                                transform,
+                                clip,
+                            )
+                        } else {
+                            blit_opaque_scaled_image_reuse::<true, true, true, false>(
+                                &mut target,
+                                &rgba,
+                                1280,
+                                720,
+                                transform,
+                                clip,
+                            )
+                        };
+                        assert!(painted);
+                        std::hint::black_box(target.data());
+                    }
+                    eprintln!(
+                        "scaler {tw}x{th} clip={} reuse={reuse} calls={count} ms={:.3}",
+                        clip.is_some(),
+                        start.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+            }
+        }
+    });
+}
+
+#[test]
+#[ignore = "isolated geometry and row-allocation ABBA benchmark"]
+fn benchmark_scaler_reusable_setup() {
+    let key = ScalerPlanKey {
+        width: 1280,
+        origin: 0.0f32.to_bits(),
+        scale: 3.0f32.to_bits(),
+        start: 0,
+        end: 3840,
+        vector: true,
+    };
+    for reuse in [false, true, true, false] {
+        let start = std::time::Instant::now();
+        for _ in 0..2000 {
+            std::hint::black_box(scaler_plan(key, reuse));
+        }
+        let geometry = start.elapsed();
+        let start = std::time::Instant::now();
+        for _ in 0..2000 {
+            with_scaler_rows(3840, reuse, |upper, lower| {
+                std::hint::black_box(upper);
+                std::hint::black_box(lower);
+            });
+        }
+        eprintln!(
+            "scaler setup 3840px x2000 reuse={reuse} geometry_us={:.3} scratch_us={:.3}",
+            geometry.as_secs_f64() * 1e6,
+            start.elapsed().as_secs_f64() * 1e6
+        );
+    }
 }
 
 #[test]
@@ -619,6 +1184,123 @@ fn opaque_blit_matches_pixmap_paint_and_rejects_other_cases() {
         4,
         Transform::from_scale(2.0, 2.0),
     ));
+}
+
+#[test]
+fn scaled_guard_reorder_preserves_acceptance_and_rejected_pixels() {
+    let cases = [
+        ("cover", Transform::from_scale(2.0, 2.0), true, true, false),
+        (
+            "inset",
+            Transform::from_translate(1.0, 1.0),
+            false,
+            true,
+            false,
+        ),
+        (
+            "fractional inset",
+            Transform::from_translate(0.5, 0.5).pre_scale(1.5, 1.5),
+            false,
+            true,
+            false,
+        ),
+        (
+            "underfill",
+            Transform::from_scale(0.5, 0.5),
+            false,
+            true,
+            false,
+        ),
+        (
+            "cropped cover",
+            Transform::from_translate(-1.0, -1.0).pre_scale(3.0, 3.0),
+            true,
+            true,
+            false,
+        ),
+        (
+            "empty right",
+            Transform::from_translate(20.0, 0.0),
+            false,
+            true,
+            true,
+        ),
+        (
+            "empty left",
+            Transform::from_translate(-20.0, 0.0),
+            false,
+            true,
+            true,
+        ),
+        (
+            "zero scale",
+            Transform::from_scale(0.0, 1.0),
+            false,
+            false,
+            true,
+        ),
+        (
+            "negative scale",
+            Transform::from_scale(-1.0, 1.0),
+            false,
+            false,
+            true,
+        ),
+    ];
+    let mut full = tiny_skia::Mask::new(8, 8).unwrap();
+    full.data_mut().fill(255);
+    let mut partial = tiny_skia::Mask::new(8, 8).unwrap();
+    for (index, alpha) in partial.data_mut().iter_mut().enumerate() {
+        *alpha = [0, 128, 255][index % 3];
+    }
+    for (name, transform, unclipped, clipped, empty) in cases {
+        for mask in [None, Some(&full), Some(&partial)] {
+            for opaque in [true, false] {
+                let mut rgba = [40, 60, 80, 255].repeat(16);
+                if !opaque {
+                    rgba[3] = 128;
+                }
+                let mut actual = Pixmap::new(8, 8).unwrap();
+                actual.fill(tiny_skia::Color::from_rgba8(17, 31, 47, 200));
+                let before = actual.clone();
+                let mut scalar = actual.clone();
+                let expected = opaque && if mask.is_some() { clipped } else { unclipped };
+                let accepted = blit_opaque_scaled_image_with_clip::<true, true, true>(
+                    &mut actual,
+                    &rgba,
+                    4,
+                    4,
+                    transform,
+                    mask,
+                );
+                assert_eq!(
+                    accepted,
+                    expected,
+                    "{name}: mask={} opaque={opaque}",
+                    mask.is_some()
+                );
+                assert_eq!(
+                    blit_opaque_scaled_image_with_clip::<true, false, false>(
+                        &mut scalar,
+                        &rgba,
+                        4,
+                        4,
+                        transform,
+                        mask
+                    ),
+                    expected
+                );
+                assert_eq!(actual.data(), scalar.data(), "{name}: vector/scalar parity");
+                if !accepted || empty {
+                    assert_eq!(
+                        actual.data(),
+                        before.data(),
+                        "{name}: rejected/empty draw wrote pixels"
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[test]
@@ -839,6 +1521,52 @@ fn opaque_scaled_parallel_and_vector_blit_match_scalar_with_clip() {
 }
 
 #[test]
+fn opaque_scaled_vector_matches_scalar_at_gather_boundaries() {
+    for width in [2u32, 11, 12, 17, 33, 64] {
+        let height = 7;
+        let rgba: Vec<u8> = (0..width * height)
+            .flat_map(|index| {
+                [
+                    (index * 13) as u8,
+                    (index * 7) as u8,
+                    (index * 3) as u8,
+                    255,
+                ]
+            })
+            .collect();
+        for scale in [0.25, 0.75, 1.0, 1.5, 2.0, 3.25] {
+            let mut scalar = Pixmap::new(220, 30).unwrap();
+            let mut vector = scalar.clone();
+            let mut mask = tiny_skia::Mask::new(220, 30).unwrap();
+            mask.fill_path(
+                &PathBuilder::from_rect(SkRect::from_xywh(0.0, 0.0, 220.0, 30.0).unwrap()),
+                FillRule::Winding,
+                false,
+                Transform::identity(),
+            );
+            let transform = Transform::from_translate(-0.25, 0.5).pre_scale(scale, scale);
+            assert!(blit_opaque_scaled_image_impl::<true, false, false>(
+                &mut scalar,
+                &rgba,
+                width,
+                height,
+                transform,
+                &mask,
+            ));
+            assert!(blit_opaque_scaled_image_impl::<true, false, true>(
+                &mut vector,
+                &rgba,
+                width,
+                height,
+                transform,
+                &mask,
+            ));
+            assert_eq!(vector.data(), scalar.data(), "width={width} scale={scale}");
+        }
+    }
+}
+
+#[test]
 #[ignore = "run explicitly when measuring 720p video paint"]
 fn benchmark_video_sized_image_paint() {
     let (width, height) = (1280u32, 720u32);
@@ -870,6 +1598,110 @@ fn benchmark_video_sized_image_paint() {
         "720p paint x40: tiny-skia {draw_time:?}, opaque blit {:?}",
         start.elapsed()
     );
+}
+
+#[test]
+fn unclipped_scaled_blit_matches_full_coverage_mask() {
+    let (width, height) = (37, 23);
+    let rgba: Vec<_> = (0..width * height)
+        .flat_map(|i| [(i * 13) as u8, (i * 7) as u8, (i * 3) as u8, 255])
+        .collect();
+    for (scale, x, y) in [(2.0, 0.0, 0.0), (1.1875, -12.0, -3.0), (0.75, -1.0, -2.0)] {
+        let mut expected = Pixmap::new(24, 15).unwrap();
+        expected.fill(SkColor::from_rgba8(17, 29, 41, 255));
+        let mut actual = expected.clone();
+        let mask = tiny_skia::Mask::from_vec(
+            vec![255; 24 * 15],
+            tiny_skia::IntSize::from_wh(24, 15).unwrap(),
+        )
+        .unwrap();
+        let transform = Transform::from_translate(x, y).pre_scale(scale, scale);
+        assert!(blit_opaque_scaled_image(
+            &mut expected,
+            &rgba,
+            width,
+            height,
+            transform,
+            &mask
+        ));
+        assert!(blit_opaque_scaled_image_with_clip::<true, true, true>(
+            &mut actual,
+            &rgba,
+            width,
+            height,
+            transform,
+            None,
+        ));
+        assert_eq!(actual.data(), expected.data());
+        let mut reference = Pixmap::new(24, 15).unwrap();
+        let source = tiny_skia::PixmapRef::from_bytes(&rgba, width, height).unwrap();
+        reference.draw_pixmap(
+            0,
+            0,
+            source,
+            &tiny_skia::PixmapPaint {
+                quality: tiny_skia::FilterQuality::Bilinear,
+                ..tiny_skia::PixmapPaint::default()
+            },
+            transform,
+            None,
+        );
+        let max_error = actual
+            .data()
+            .iter()
+            .zip(reference.data())
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        assert!(max_error <= 2, "maximum channel error {max_error}");
+    }
+    let mut target = Pixmap::new(64, 48).unwrap();
+    assert!(!blit_opaque_scaled_image_with_clip::<true, true, true>(
+        &mut target,
+        &rgba,
+        width,
+        height,
+        Transform::from_translate(0.5, 0.5),
+        None,
+    ));
+}
+
+#[test]
+#[ignore = "run explicitly when measuring unclipped software video scaling"]
+fn benchmark_unclipped_scaled_video_paint() {
+    let (width, height) = (1920, 1080);
+    let rgba: Vec<_> = (0..width * height)
+        .flat_map(|i| [(i * 13) as u8, (i * 7) as u8, (i * 3) as u8, 255])
+        .collect();
+    let source = tiny_skia::PixmapRef::from_bytes(&rgba, width, height).unwrap();
+    let mut target = Pixmap::new(3840, 2160).unwrap();
+    let paint = tiny_skia::PixmapPaint {
+        quality: tiny_skia::FilterQuality::Bilinear,
+        ..tiny_skia::PixmapPaint::default()
+    };
+    let transform = Transform::from_scale(2.0, 2.0);
+    for optimized in [false, true, true, false] {
+        let start = std::time::Instant::now();
+        for _ in 0..12 {
+            if optimized {
+                assert!(blit_opaque_scaled_image_with_clip::<true, true, true>(
+                    &mut target,
+                    &rgba,
+                    width,
+                    height,
+                    transform,
+                    None,
+                ));
+            } else {
+                target.draw_pixmap(0, 0, source, &paint, transform, None);
+            }
+            std::hint::black_box(target.data());
+        }
+        eprintln!(
+            "unclipped 4K video x12 optimized={optimized}: {:?}",
+            start.elapsed()
+        );
+    }
 }
 
 #[test]
@@ -1154,6 +1986,451 @@ impl ShadowRasterCache {
 thread_local! {
     static SHADOW_RASTER_CACHE: std::cell::RefCell<ShadowRasterCache> =
         std::cell::RefCell::new(ShadowRasterCache::default());
+}
+
+fn shaped_text_key(
+    text: &str,
+    physical_size: f32,
+    physical_line_height: f32,
+    weight: u16,
+    style: u8,
+    family: &str,
+    stretch: f32,
+    letter_spacing: f32,
+    word_spacing: f32,
+    small_caps: bool,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    physical_size.to_bits().hash(&mut h);
+    physical_line_height.to_bits().hash(&mut h);
+    weight.hash(&mut h);
+    style.hash(&mut h);
+    family.hash(&mut h);
+    stretch.to_bits().hash(&mut h);
+    letter_spacing.to_bits().hash(&mut h);
+    word_spacing.to_bits().hash(&mut h);
+    small_caps.hash(&mut h);
+    h.finish()
+}
+
+fn shape_control_text(
+    font_system: &mut FontSystem,
+    text: &str,
+    metrics: Metrics,
+    attrs: &Attrs<'_>,
+    family: &str,
+    letter_spacing: f32,
+    word_spacing: f32,
+    scale: f32,
+    layout: Option<super::display_list::ControlTextLayout>,
+) -> Buffer {
+    let mut buffer = Buffer::new(font_system, metrics);
+    buffer.set_size(font_system, layout.map(|layout| layout.width * scale), None);
+    buffer.set_wrap(
+        font_system,
+        layout.map_or(cosmic_text::Wrap::None, |layout| layout.wrap),
+    );
+    let mut pieces = Vec::new();
+    let word_attrs = attrs
+        .clone()
+        .letter_spacing(((letter_spacing + word_spacing) * scale) / metrics.font_size);
+    let mut rest = text;
+    if word_spacing != 0.0 {
+        while let Some(at) = rest.find(' ') {
+            if at > 0 {
+                pieces.push((&rest[..at], attrs.clone()));
+            }
+            pieces.push((&rest[at..at + 1], word_attrs.clone()));
+            rest = &rest[at + 1..];
+        }
+    }
+    pieces.push((rest, attrs.clone()));
+    let spans: Vec<_> = pieces
+        .iter()
+        .flat_map(|(s, a)| crate::layout::inline_layout::css_font_spans(font_system, s, family, a))
+        .collect();
+    buffer.set_rich_text(
+        font_system,
+        spans.iter().map(|(s, a)| (*s, a.as_attrs())),
+        attrs,
+        Shaping::Advanced,
+        None,
+    );
+    // Rich-text paragraph splitting omits the editable empty line after Enter.
+    if text.ends_with('\n') {
+        buffer.lines.push(cosmic_text::BufferLine::new(
+            "",
+            cosmic_text::LineEnding::None,
+            cosmic_text::AttrsList::new(attrs),
+            Shaping::Advanced,
+        ));
+    }
+    if let Some(layout) = layout {
+        for line in &mut buffer.lines {
+            line.set_align(Some(layout.align));
+        }
+    }
+    buffer.shape_until_scroll(font_system, false);
+    buffer
+}
+
+fn control_text_key(
+    font_system: &FontSystem,
+    text: &str,
+    typography: &super::display_list::PlaceholderTypography,
+    line_height: f32,
+    scale: f32,
+) -> u64 {
+    let size_adjust =
+        crate::layout::inline_layout::font_size_adjust_scale(font_system, &typography.font_family);
+    control_layout_key(
+        shaped_text_key(
+            text,
+            (typography.font_size * size_adjust * scale).max(1.0),
+            (line_height * scale).max(1.0),
+            typography.font_weight,
+            typography.font_style,
+            &typography.font_family,
+            typography.font_stretch,
+            typography.letter_spacing,
+            typography.word_spacing,
+            false,
+        ),
+        typography.layout,
+        scale,
+    )
+}
+
+fn control_layout_key(
+    key: u64,
+    layout: Option<super::display_list::ControlTextLayout>,
+    scale: f32,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let Some(layout) = layout else { return key };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    key.hash(&mut hasher);
+    (layout.width * scale).to_bits().hash(&mut hasher);
+    (layout.wrap as u8).hash(&mut hasher);
+    (layout.align as u8).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Read the caret from the paint shaping model, even on a different replay thread.
+pub(super) fn painted_control_cursor(
+    font_system: &mut FontSystem,
+    text: &str,
+    character_index: usize,
+    typography: &super::display_list::PlaceholderTypography,
+    line_height: f32,
+    scale: f32,
+) -> Option<(f32, f32)> {
+    use cosmic_text::Edit;
+    if text.is_empty() {
+        let x = typography.layout.map_or(0.0, |layout| match layout.align {
+            cosmic_text::Align::Right => layout.width,
+            cosmic_text::Align::Center => layout.width / 2.0,
+            _ => 0.0,
+        });
+        return Some((x, 0.0));
+    }
+    let key = control_text_key(font_system, text, typography, line_height, scale);
+    let size_adjust =
+        crate::layout::inline_layout::font_size_adjust_scale(font_system, &typography.font_family);
+    let prefix: String = text.chars().take(character_index).collect();
+    let line = prefix.bytes().filter(|&ch| ch == b'\n').count();
+    let index = prefix.rsplit('\n').next().unwrap_or_default().len();
+    SHAPED.with(|cell| {
+        let mut cache = cell.borrow_mut();
+        let faces = font_system.db().len();
+        if cache.0 != faces || cache.1.len() > 8192 {
+            cache.1.clear();
+            cache.0 = faces;
+        }
+        if !cache.1.contains_key(&key) {
+            let resolved = crate::layout::inline_layout::resolve_css_family(
+                font_system,
+                &typography.font_family,
+            );
+            let font_size = (typography.font_size * size_adjust * scale).max(1.0);
+            let attrs = Attrs::new()
+                .family(resolved.as_family())
+                .weight(CTextWeight(typography.font_weight))
+                .style(match typography.font_style {
+                    1 => CTextStyle::Italic,
+                    2 => CTextStyle::Oblique,
+                    _ => CTextStyle::Normal,
+                })
+                .stretch(crate::layout::inline_layout::stretch_from_percent(
+                    typography.font_stretch,
+                ))
+                .letter_spacing(typography.letter_spacing * scale / font_size);
+            let buffer = shape_control_text(
+                font_system,
+                text,
+                Metrics::new(font_size, (line_height * scale).max(1.0)),
+                &attrs,
+                &typography.font_family,
+                typography.letter_spacing,
+                typography.word_spacing,
+                scale,
+                typography.layout,
+            );
+            cache.1.insert(key, buffer);
+        }
+        let buffer = cache.1.get_mut(&key)?;
+        let mut editor = cosmic_text::Editor::new(buffer);
+        editor.set_cursor(cosmic_text::Cursor::new(line, index));
+        editor
+            .cursor_position()
+            .map(|(x, y)| (x as f32 / scale, y as f32 / scale))
+    })
+}
+
+pub(super) fn painted_control_hit(
+    font_system: &mut FontSystem,
+    text: &str,
+    typography: &super::display_list::PlaceholderTypography,
+    line_height: f32,
+    scale: f32,
+    point: (f32, f32),
+) -> Option<usize> {
+    if text.is_empty() {
+        return Some(0);
+    }
+    // Populate the same bounded shaping cache used by caret and value paint.
+    painted_control_cursor(font_system, text, 0, typography, line_height, scale)?;
+    let key = control_text_key(font_system, text, typography, line_height, scale);
+    let hit = SHAPED.with(|cell| {
+        let cache = cell.borrow();
+        let buffer = cache.1.get(&key)?;
+        let cursor = buffer.hit(point.0 * scale, point.1 * scale)?;
+        let mut offset = 0;
+        for (index, line) in text.split('\n').enumerate() {
+            if index == cursor.line {
+                return Some(
+                    offset
+                        + line[..floor_control_char_boundary(line, cursor.index)]
+                            .chars()
+                            .count(),
+                );
+            }
+            offset += line.chars().count() + 1;
+        }
+        Some(text.chars().count())
+    })?;
+    // Hit testing may return a scalar inside an extended grapheme (combining
+    // marks or an emoji sequence). Use its two painted edges, never its interior.
+    let byte = text
+        .char_indices()
+        .nth(hit)
+        .map_or(text.len(), |(at, _)| at);
+    use unicode_segmentation::UnicodeSegmentation;
+    if byte == text.len() || text.grapheme_indices(true).any(|(at, _)| at == byte) {
+        return Some(hit);
+    }
+    let before = crate::dom::adjacent_grapheme_boundary(text, byte, false);
+    let after = crate::dom::adjacent_grapheme_boundary(text, byte, true);
+    let before = text[..before].chars().count();
+    let after = text[..after].chars().count();
+    let left = painted_control_cursor(font_system, text, before, typography, line_height, scale)?;
+    let right = painted_control_cursor(font_system, text, after, typography, line_height, scale)?;
+    Some(if (point.0 - left.0).abs() <= (point.0 - right.0).abs() {
+        before
+    } else {
+        after
+    })
+}
+
+pub(crate) fn painted_control_extent(
+    font_system: &mut FontSystem,
+    text: &str,
+    typography: &super::display_list::PlaceholderTypography,
+    line_height: f32,
+    scale: f32,
+) -> (f32, f32) {
+    if text.is_empty() {
+        return (0.0, line_height);
+    }
+    painted_control_cursor(font_system, text, 0, typography, line_height, scale);
+    let key = control_text_key(font_system, text, typography, line_height, scale);
+    SHAPED.with(|cell| {
+        let cache = cell.borrow();
+        cache.1.get(&key).map_or((0.0, line_height), |buffer| {
+            buffer
+                .layout_runs()
+                .fold((0.0_f32, line_height), |(width, height), run| {
+                    (
+                        width.max(run.line_w / scale),
+                        height.max((run.line_top + run.line_height) / scale),
+                    )
+                })
+        })
+    })
+}
+
+pub(super) fn painted_control_vertical_motion(
+    font_system: &mut FontSystem,
+    text: &str,
+    character_index: usize,
+    typography: &super::display_list::PlaceholderTypography,
+    line_height: f32,
+    scale: f32,
+    down: bool,
+    previous: Option<(usize, u64, Option<f32>)>,
+) -> Option<(usize, u64, Option<f32>)> {
+    let (x, y) = painted_control_cursor(
+        font_system,
+        text,
+        character_index,
+        typography,
+        line_height,
+        scale,
+    )?;
+    let key = control_text_key(font_system, text, typography, line_height, scale);
+    if text.is_empty() {
+        return Some((0, key, None));
+    }
+    let goal = previous
+        .filter(|(index, old_key, _)| *index == character_index && *old_key == key)
+        .and_then(|(_, _, goal)| goal)
+        .unwrap_or(x * scale);
+    SHAPED.with(|cell| {
+        let cache = cell.borrow();
+        let buffer = cache.1.get(&key)?;
+        let next_y = y * scale + buffer.metrics().line_height * if down { 1.5 } else { -0.5 };
+        let next = buffer.hit(goal, next_y)?;
+        let mut offset = 0;
+        for (line_index, line) in text.split('\n').enumerate() {
+            if line_index == next.line {
+                return Some((
+                    offset
+                        + line[..floor_control_char_boundary(line, next.index)]
+                            .chars()
+                            .count(),
+                    key,
+                    Some(goal),
+                ));
+            }
+            offset += line.chars().count() + 1;
+        }
+        None
+    })
+}
+
+fn floor_control_char_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn painted_control_selection(
+    font_system: &mut FontSystem,
+    text: &str,
+    range: &std::ops::Range<usize>,
+    typography: &super::display_list::PlaceholderTypography,
+    line_height: f32,
+    scale: f32,
+) -> Vec<Rect> {
+    use unicode_segmentation::UnicodeSegmentation;
+    if range.is_empty() {
+        return Vec::new();
+    }
+    let cursor = |offset: usize| {
+        let prefix: String = text.chars().take(offset).collect();
+        cosmic_text::Cursor::new(
+            prefix.bytes().filter(|&ch| ch == b'\n').count(),
+            prefix.rsplit('\n').next().unwrap_or_default().len(),
+        )
+    };
+    let start = cursor(range.start);
+    let end = cursor(range.end);
+    if painted_control_cursor(
+        font_system,
+        text,
+        range.start,
+        typography,
+        line_height,
+        scale,
+    )
+    .is_none()
+    {
+        return Vec::new();
+    }
+    let key = control_text_key(font_system, text, typography, line_height, scale);
+    SHAPED.with(|cell| {
+        let cache = cell.borrow();
+        let Some(buffer) = cache.1.get(&key) else {
+            return Vec::new();
+        };
+        let mut rects: Vec<Rect> = Vec::new();
+        for run in buffer.layout_runs() {
+            if run.line_i < start.line || run.line_i > end.line {
+                continue;
+            }
+            let first = if run.line_i == start.line {
+                start.index
+            } else {
+                0
+            };
+            let last = if run.line_i == end.line {
+                end.index
+            } else {
+                run.text.len()
+            };
+            let mut row = Vec::new();
+            for glyph in run.glyphs {
+                if glyph.end <= first || glyph.start >= last {
+                    continue;
+                }
+                let cluster = &run.text[glyph.start..glyph.end];
+                let grapheme_count = cluster.graphemes(true).count();
+                if grapheme_count == 0 {
+                    continue;
+                }
+                for (index, (byte, grapheme)) in cluster.grapheme_indices(true).enumerate() {
+                    if glyph.start + byte >= last || glyph.start + byte + grapheme.len() <= first {
+                        continue;
+                    }
+                    let width = glyph.w / grapheme_count as f32;
+                    let visual = if glyph.level.is_rtl() {
+                        grapheme_count - index - 1
+                    } else {
+                        index
+                    };
+                    row.push(Rect::new(
+                        (glyph.x + width * visual as f32) / scale,
+                        run.line_top / scale,
+                        width / scale,
+                        run.line_height / scale,
+                    ));
+                }
+            }
+            row.sort_by(|a, b| a.x.total_cmp(&b.x));
+            for rect in row {
+                if let Some(previous) = rects.last_mut()
+                    && (previous.y - rect.y).abs() < f32::EPSILON
+                    && rect.x <= previous.right() + f32::EPSILON
+                {
+                    previous.w = previous.right().max(rect.right()) - previous.x;
+                } else {
+                    rects.push(rect);
+                }
+            }
+        }
+        rects
+    })
+}
+
+#[derive(Clone, Copy)]
+struct TextPaintSelection<'a> {
+    /// Physical-pixel bounds; glyph coverage is recolored in the existing blit pass.
+    rects: &'a [Rect],
+    foreground: Color,
 }
 
 #[derive(Clone)]
@@ -1557,25 +2834,57 @@ fn rect_outside_view(rect: Rect, left: f32, top: f32, right: f32, bottom: f32) -
     rect.right() < left || rect.x > right || rect.bottom() < top || rect.y > bottom
 }
 
-fn gradient_stops_with_transparent_hues(
+fn raster_gradient_stops(
     stops: &[(Color, f32)],
     opacity: f32,
+) -> (Vec<tiny_skia::GradientStop>, f32) {
+    // Keep the authored interpolation outside the nominal line, before the
+    // raster backend clamps stop positions to its normalized shader domain.
+    let extent = stops.last().map_or(1.0, |(_, at)| at.max(1.0));
+    (
+        raster_gradient_stop_range(stops, opacity, 0.0, extent, true),
+        extent,
+    )
+}
+
+fn raster_gradient_stop_range(
+    stops: &[(Color, f32)],
+    opacity: f32,
+    origin: f32,
+    extent: f32,
+    clip_negative: bool,
 ) -> Vec<tiny_skia::GradientStop> {
+    let boundary = stops
+        .first()
+        .filter(|(_, at)| clip_negative && *at < 0.0)
+        .map(|_| (sample_gradient_stops(stops, 0.0), 0.0));
+    let visible = boundary.into_iter().chain(
+        stops
+            .iter()
+            .copied()
+            .filter(|(_, at)| !clip_negative || *at >= 0.0),
+    );
+    let mut opaque = visible.clone().filter(|(color, _)| color.a > 0).peekable();
+    let mut before = None;
     let mut result = Vec::with_capacity(stops.len() + 2);
-    for (index, (color, position)) in stops.iter().enumerate() {
+    for (color, position) in visible {
+        let position = (position - origin) / extent;
+        if color.a > 0 {
+            before = Some(color);
+            opaque.next();
+        }
         let alpha = (color.a as f32 * opacity).clamp(0.0, 255.0) as u8;
         if color.a == 0 {
-            let before = stops[..index].iter().rev().find(|(c, _)| c.a > 0);
-            let after = stops[index + 1..].iter().find(|(c, _)| c.a > 0);
-            if let Some((neighbor, _)) = before {
+            let after = opaque.peek().map(|(color, _)| *color);
+            if let Some(neighbor) = before {
                 result.push(tiny_skia::GradientStop::new(
-                    *position,
+                    position,
                     tiny_skia::Color::from_rgba8(neighbor.r, neighbor.g, neighbor.b, 0),
                 ));
             }
-            if let Some((neighbor, _)) = after {
+            if let Some(neighbor) = after {
                 result.push(tiny_skia::GradientStop::new(
-                    *position,
+                    position,
                     tiny_skia::Color::from_rgba8(neighbor.r, neighbor.g, neighbor.b, 0),
                 ));
             }
@@ -1584,11 +2893,71 @@ fn gradient_stops_with_transparent_hues(
             }
         }
         result.push(tiny_skia::GradientStop::new(
-            *position,
+            position,
             tiny_skia::Color::from_rgba8(color.r, color.g, color.b, alpha),
         ));
     }
     result
+}
+
+fn linear_gradient_geometry(
+    rect: Rect,
+    angle: f32,
+    direction: GradientDirection,
+) -> (f32, f32, f32) {
+    let angle = match direction {
+        GradientDirection::Angle(_) => angle,
+        GradientDirection::Corner { x, y } => {
+            (x as f32 * rect.w).atan2(-(y as f32 * rect.h)).to_degrees()
+        }
+    };
+    let rad = angle.to_radians();
+    let (dx, dy) = (rad.sin(), -rad.cos());
+    (dx, dy, ((rect.w * dx).abs() + (rect.h * dy).abs()) / 2.0)
+}
+
+fn average_gradient_stops(stops: &[(Color, f32)]) -> Color {
+    if stops.len() < 2 {
+        return stops
+            .first()
+            .map_or(Color::TRANSPARENT, |(color, _)| *color);
+    }
+    let span = stops.last().unwrap().1 - stops[0].1;
+    let mut sum = [0.0_f32; 4];
+    for pair in stops.windows(2) {
+        let weight = if span > 0.0 {
+            (pair[1].1 - pair[0].1) / (2.0 * span)
+        } else {
+            0.5 / (stops.len() - 1) as f32
+        };
+        for (color, _) in pair {
+            let alpha = color.a as f32 / 255.0;
+            for (channel, value) in sum[..3].iter_mut().zip([color.r, color.g, color.b]) {
+                *channel += value as f32 * alpha * weight;
+            }
+            sum[3] += alpha * weight;
+        }
+    }
+    if sum[3] <= 0.0 {
+        return Color::TRANSPARENT;
+    }
+    Color::rgba(
+        (sum[0] / sum[3]).round().clamp(0.0, 255.0) as u8,
+        (sum[1] / sum[3]).round().clamp(0.0, 255.0) as u8,
+        (sum[2] / sum[3]).round().clamp(0.0, 255.0) as u8,
+        (sum[3] * 255.0).round().clamp(0.0, 255.0) as u8,
+    )
+}
+
+fn repeating_gradient_average(stops: &[(Color, f32)], physical_line_length: f32) -> Option<Color> {
+    let span = stops.last()?.1 - stops.first()?.1;
+    const MIN_RENDERABLE_PERIOD_PX: f32 = 1.0;
+    (span <= 0.0 || span * physical_line_length < MIN_RENDERABLE_PERIOD_PX)
+        .then(|| average_gradient_stops(stops))
+}
+
+fn transformed_vector_length(transform: Transform, x: f32, y: f32) -> f32 {
+    (transform.sx * x + transform.kx * y).hypot(transform.ky * x + transform.sy * y)
 }
 
 fn transformed_bounds_to_viewport(ts: Transform, rect: Rect, scale: f32) -> Option<Rect> {
@@ -3226,6 +4595,10 @@ fn replay_commands_on_surface(
                         if blit_opaque_scaled_image(target, rgba, iw, ih, img_ts, mask) {
                             continue;
                         }
+                    } else if blit_opaque_scaled_image_with_clip::<true, true, true>(
+                        target, rgba, iw, ih, img_ts, None,
+                    ) {
+                        continue;
                     }
                     let paint = tiny_skia::PixmapPaint {
                         quality: tiny_skia::FilterQuality::Bilinear,
@@ -3298,6 +4671,8 @@ fn replay_commands_on_surface(
                             *small_caps,
                             clip_mask,
                             text_gradient.as_ref(),
+                            None,
+                            None,
                         );
                     } else {
                         draw_transformed_text_cmd(
@@ -3370,17 +4745,7 @@ fn replay_commands_on_surface(
                 // transformed stacking context lives in that same transformed
                 // coordinate space, just like the paint commands it clips.
                 let parent = clip_mask_stack.last().and_then(|m| m.as_ref());
-                let mask = if transform_depth == 0
-                    && simple_clip_contains_viewport(
-                        rect,
-                        radius,
-                        radius_y,
-                        pw,
-                        ph,
-                        scale,
-                        active_scroll_x,
-                        active_scroll_y,
-                    ) {
+                let mask = if simple_clip_contains_viewport(rect, radius, radius_y, pw, ph, ts) {
                     parent.cloned()
                 } else {
                     clip_cache.rect(rect, radius, radius_y, pw, ph, ts, parent)
@@ -4008,7 +5373,7 @@ fn replay_commands_on_surface(
                 blend_mode,
             } => {
                 use tiny_skia::{LinearGradient, Point as SkPoint, RadialGradient, SpreadMode};
-                if stops.len() < 2 {
+                if stops.is_empty() {
                     continue;
                 }
                 let a2 = 1.0;
@@ -4023,30 +5388,57 @@ fn replay_commands_on_surface(
                     continue;
                 }
 
-                let sk_stops = gradient_stops_with_transparent_hues(stops, combined_opacity);
+                let repeating = matches!(*gradient_type, 3 | 4);
+                let (dx, dy, half) = linear_gradient_geometry(*rect, *angle, *direction);
+                let physical_length = if matches!(*gradient_type, 1 | 3) {
+                    transformed_vector_length(ts, dx * half * 2.0, dy * half * 2.0)
+                } else {
+                    transformed_vector_length(ts, *radial_radius_x, 0.0)
+                        .min(transformed_vector_length(ts, 0.0, *radial_radius_y))
+                };
+                let average = repeating
+                    .then(|| repeating_gradient_average(stops, physical_length))
+                    .flatten();
+                let origin = if repeating { stops[0].1 } else { 0.0 };
+                let (sk_stops, stop_extent) = if repeating {
+                    let extent = stops.last().unwrap().1 - origin;
+                    (
+                        raster_gradient_stop_range(
+                            stops,
+                            combined_opacity,
+                            origin,
+                            extent.max(f32::MIN_POSITIVE),
+                            false,
+                        ),
+                        extent,
+                    )
+                } else {
+                    raster_gradient_stops(stops, combined_opacity)
+                };
+                let spread = if repeating {
+                    SpreadMode::Repeat
+                } else {
+                    SpreadMode::Pad
+                };
 
                 // The gradient image is the size of the POSITIONING area
                 // (`background-origin`) and is drawn once per tile, so its
                 // geometry is measured from each tile's own origin.
                 let shader_for = |px: f32, py: f32| -> Option<tiny_skia::Shader<'static>> {
+                    if let Some(color) = average {
+                        return Some(tiny_skia::Shader::SolidColor(tiny_skia::Color::from_rgba8(
+                            color.r,
+                            color.g,
+                            color.b,
+                            (color.a as f32 * combined_opacity).clamp(0.0, 255.0) as u8,
+                        )));
+                    }
                     match gradient_type {
-                        1 => {
+                        1 | 3 => {
                             // The gradient line (css-images-3 §3.4.1): it runs through
                             // the centre of the box in the direction of `angle` — 0deg
                             // points up, angles turn clockwise — and is long enough that
                             // its perpendicular endpoints touch the two opposite corners.
-                            let used_angle = match direction {
-                                GradientDirection::Angle(_) => *angle,
-                                GradientDirection::Corner { x, y } => {
-                                    let dx = *x as f32 * pw;
-                                    let dy = *y as f32 * ph;
-                                    dx.atan2(-dy).to_degrees().rem_euclid(360.0)
-                                }
-                            };
-                            let rad = used_angle * std::f32::consts::PI / 180.0;
-                            let dx = rad.sin();
-                            let dy = -rad.cos();
-                            let half = ((pw * dx).abs() + (ph * dy).abs()) / 2.0;
                             if half <= 0.0 {
                                 return None;
                             }
@@ -4054,32 +5446,44 @@ fn replay_commands_on_surface(
                             let cy = py + ph / 2.0;
 
                             LinearGradient::new(
-                                SkPoint::from_xy(cx - dx * half, cy - dy * half),
-                                SkPoint::from_xy(cx + dx * half, cy + dy * half),
+                                SkPoint::from_xy(
+                                    cx + dx * half * (2.0 * origin - 1.0),
+                                    cy + dy * half * (2.0 * origin - 1.0),
+                                ),
+                                SkPoint::from_xy(
+                                    cx + dx * half * (2.0 * (origin + stop_extent) - 1.0),
+                                    cy + dy * half * (2.0 * (origin + stop_extent) - 1.0),
+                                ),
                                 sk_stops.clone(),
-                                SpreadMode::Pad,
+                                spread,
                                 Transform::identity(),
                             )
                         }
-                        2 => {
+                        2 | 4 => {
                             let cx = px + *radial_center_x;
                             let cy = py + *radial_center_y;
-                            let rx = (*radial_radius_x).max(1.0);
-                            let ry = (*radial_radius_y).max(1.0);
-                            let r = rx.max(ry);
-                            let center = SkPoint::from_xy(cx, cy);
-                            let sx = rx / r;
-                            let sy = ry / r;
-                            let transform = Transform::from_translate(-cx, -cy)
-                                .post_scale(1.0 / sx, 1.0 / sy)
-                                .post_translate(cx, cy);
+                            let rx = *radial_radius_x;
+                            let ry = *radial_radius_y;
+                            // A canonical unit circle avoids the backend's small-radius
+                            // rejection. Its transform carries the CSS ellipse geometry.
+                            let center = SkPoint::from_xy(0.0, 0.0);
+                            // Shift by whole periods so the concentric shader never
+                            // receives a negative radius, without changing its phase.
+                            let start_radius = if repeating {
+                                origin.rem_euclid(stop_extent) / stop_extent
+                            } else {
+                                0.0
+                            };
+                            let transform =
+                                Transform::from_scale(rx * stop_extent, ry * stop_extent)
+                                    .post_translate(cx, cy);
                             RadialGradient::new(
                                 center,
-                                0.0,
+                                start_radius,
                                 center,
-                                r,
+                                start_radius + 1.0,
                                 sk_stops.clone(),
-                                SpreadMode::Pad,
+                                spread,
                                 transform,
                             )
                         }
@@ -4413,6 +5817,7 @@ fn replay_commands_on_surface(
                 text_align,
                 direction,
                 placeholder_color,
+                value_typography,
                 placeholder_typography,
                 file_button_color,
                 file_button_background,
@@ -4423,15 +5828,21 @@ fn replay_commands_on_surface(
                 value,
                 placeholder,
                 input_cursor,
+                text_selection,
                 appearance_none,
                 vertical,
                 options,
                 selected,
                 selected_all,
+                content_scroll,
             } => {
                 // CSS background/border/padding are drawn by the normal pipeline.
                 // FormElement only draws the CONTENT: value text, check marks, radio dots, etc.
                 let a2 = 1.0;
+                let control_font_stretch = value_typography.as_deref().map_or(
+                    crate::types::ComputedStyle::INITIAL_FONT_STRETCH_PERCENT,
+                    |style| style.font_stretch,
+                );
                 let (form_scale, rect) = transformed_axis_aligned_rect(&ts, *rect);
                 let scale = form_scale;
                 let target = layer_stack
@@ -4492,42 +5903,38 @@ fn replay_commands_on_surface(
                     // text branch below and drew their value as a STRING, which
                     // is why the widget gallery showed `0.6` where a bar goes.
                     ("progress", _) | ("meter", _) => {
+                        if *appearance_none {
+                            continue;
+                        }
                         let attr = |name: &str| {
                             attributes
                                 .iter()
                                 .find(|(k, _)| k == name)
-                                .and_then(|(_, v)| v.trim().parse::<f32>().ok())
+                                .map(|(_, v)| v.as_str())
                         };
-                        // The defaults are the spec's: `max` is 1 for a
-                        // progress bar and for a meter, `min` is 0.
-                        let min = attr("min").unwrap_or(0.0);
-                        let max = attr("max").unwrap_or(1.0).max(min);
-                        let has_value = attributes.iter().any(|(k, _)| k == "value");
-                        let value = attr("value").unwrap_or(min).clamp(min, max);
-                        let span = max - min;
-
-                        let mut gauge = crate::widgets::Gauge::new(if span > 0.0 {
-                            (value - min) / span
+                        let mut gauge = if tag == "progress" {
+                            let state = crate::html::forms::progress_state(attr);
+                            let mut gauge =
+                                crate::widgets::Gauge::new((state.value / state.max) as f32);
+                            gauge.indeterminate = state.indeterminate;
+                            gauge
                         } else {
-                            0.0
-                        });
+                            let state = crate::html::forms::meter_state(attr);
+                            let mut gauge = crate::widgets::Gauge::new(state.fraction() as f32);
+                            gauge.band = crate::widgets::progress::meter_band_f64(
+                                state.value,
+                                state.min,
+                                state.max,
+                                state.low,
+                                state.high,
+                                state.optimum,
+                            );
+                            gauge
+                        };
                         gauge.width = rect.w;
                         gauge.height = rect.h;
-                        // **A `<progress>` with no `value` is indeterminate**,
-                        // which HTML distinguishes from `value="0"`. A meter
-                        // has no such state — `value` is required.
-                        gauge.indeterminate = tag == "progress" && !has_value;
-                        if tag == "meter" {
-                            gauge.band = crate::widgets::meter_band(
-                                value,
-                                min,
-                                max,
-                                attr("low").unwrap_or(min),
-                                attr("high").unwrap_or(max),
-                                attr("optimum").unwrap_or((min + max) / 2.0),
-                            );
-                        }
-                        gauge.paint(target, rect.x, rect.y, scale);
+                        gauge.rtl = *direction == crate::types::Direction::RTL;
+                        gauge.paint_with_clip(target, rect.x, rect.y, scale, clip_mask);
                     }
                     // A list box is decided by DISPLAY SIZE (HTML §15.5.16),
                     // which defaults to 4 under `multiple` and 1 otherwise.
@@ -4549,28 +5956,19 @@ fn replay_commands_on_surface(
                             > 1 =>
                     {
                         let ts = Transform::from_scale(scale, scale);
-                        if !*appearance_none {
-                            // The box itself: the UA sheet gives a `<select>` a
-                            // white field and a grey border, and a list box is the
-                            // same field with rows in it.
-                            let mut fill = Paint::default();
-                            fill.anti_alias = true;
-                            fill.set_color_rgba8(255, 255, 255, 255);
-                            if let Some(r) = SkRect::from_xywh(rect.x, rect.y, rect.w, rect.h) {
-                                target.fill_rect(r, &fill, ts, None);
-                            }
-                        }
-
                         // Shared with the hit test, so a click cannot land on a
                         // row other than the one drawn here.
                         let line_h = crate::html::forms::list_box_row_height(*font_size);
                         let pad = crate::html::forms::LIST_BOX_PADDING;
                         for (i, label) in options.iter().enumerate() {
-                            let row_y = rect.y + pad + i as f32 * line_h;
+                            let row_y = rect.y + pad + i as f32 * line_h - content_scroll.1;
+                            if row_y + line_h <= rect.y {
+                                continue;
+                            }
                             // Clip to the box: a list shows the rows that FIT
                             // and scrolls the rest, and drawing past the border
                             // would paint over whatever is beside it.
-                            if row_y + line_h > rect.y + rect.h - pad {
+                            if row_y >= rect.y + rect.h {
                                 break;
                             }
                             let mut text_color = apply_opacity(color, a2);
@@ -4589,7 +5987,7 @@ fn replay_commands_on_surface(
                                     (rect.w - 2.0).max(0.0),
                                     line_h,
                                 ) {
-                                    target.fill_rect(r, &bar, ts, None);
+                                    target.fill_rect(r, &bar, ts, clip_mask);
                                 }
                                 text_color = crate::types::Color::rgba(255, 255, 255, 255);
                             }
@@ -4606,7 +6004,7 @@ fn replay_commands_on_surface(
                                     *font_size,
                                     *font_weight,
                                     0,
-                                    rect.w - 8.0,
+                                    control_font_stretch,
                                     line_h,
                                     &text_color,
                                     &super::display_list::TextDecoration::default(),
@@ -4619,24 +6017,41 @@ fn replay_commands_on_surface(
                         }
                     }
                     ("select", _) => {
+                        let rtl = *direction == crate::types::Direction::RTL;
+                        let indicator = if *appearance_none {
+                            0.0
+                        } else {
+                            crate::widgets::select::indicator_inline_size(*font_size).min(rect.w)
+                        };
+                        let inset = if *appearance_none {
+                            0.0
+                        } else {
+                            crate::widgets::select::label_inline_inset(*font_size)
+                        };
+                        let label_rect = Rect::new(
+                            rect.x + inset + if rtl { indicator } else { 0.0 },
+                            rect.y,
+                            (rect.w - indicator - inset * 2.0).max(0.0),
+                            rect.h,
+                        );
                         // The transformed rectangle is in scaled logical coordinates,
                         // while clip masks and glyph coverage use device pixels.
-                        let mut control_clip = build_clip_mask_with_transform(
-                            &rect,
+                        let control_clip = clip_cache.rect(
+                            &label_rect,
                             &[0.0; 4],
                             &[0.0; 4],
                             pw,
                             ph,
                             Transform::from_scale(scale, scale),
+                            clip_mask_stack.last().and_then(|mask| mask.as_ref()),
                         );
-                        if let (Some(control), Some(ancestor)) = (&mut control_clip, clip_mask) {
-                            for (dst, src) in control.data_mut().iter_mut().zip(ancestor.data()) {
-                                *dst = (*dst as u16 * *src as u16 / 255) as u8;
-                            }
-                        }
                         if !*appearance_none {
                             // Draw dropdown chevron arrow using the element's text color
-                            let arrow_x = rect.x + rect.w - 14.0;
+                            let arrow_x = if rtl {
+                                rect.x + indicator / 2.0
+                            } else {
+                                rect.right() - indicator / 2.0
+                            };
                             let arrow_y = rect.y + rect.h / 2.0;
                             let ts = Transform::from_scale(scale, scale);
                             let c = apply_opacity(color, a2);
@@ -4650,22 +6065,38 @@ fn replay_commands_on_surface(
                             pb.line_to(arrow_x, arrow_y + 2.0);
                             pb.line_to(arrow_x + 4.0, arrow_y - 2.0);
                             if let Some(path) = pb.finish() {
-                                target.stroke_path(&path, &paint, &stroke, ts, None);
+                                target.stroke_path(&path, &paint, &stroke, ts, clip_mask);
                             }
                         }
                         // Draw selected value text
                         let display_text = if value.is_empty() { placeholder } else { value };
-                        if !display_text.is_empty() {
+                        if !display_text.is_empty() && label_rect.w > 0.0 {
                             if let Some((ref mut fs, ref mut sc)) = text_ctx {
                                 let c = apply_opacity(color, a2);
                                 let line_h = *font_size * 1.2;
                                 let text_y = rect.y + (rect.h - line_h).max(0.0) / 2.0;
+                                let text_x = if rtl {
+                                    let width =
+                                        crate::layout::inline_layout::measure_text_width_fs_attrs(
+                                            fs,
+                                            display_text,
+                                            *font_size,
+                                            cosmic_text::Weight(*font_weight),
+                                            CTextStyle::Normal,
+                                            scale,
+                                            font_family,
+                                            cosmic_text::Stretch::Normal,
+                                        );
+                                    label_rect.right() - width
+                                } else {
+                                    label_rect.x
+                                };
                                 draw_text_cmd(
                                     target,
                                     *fs,
                                     *sc,
                                     scale,
-                                    rect.x + 4.0,
+                                    text_x,
                                     text_y,
                                     display_text,
                                     font_family,
@@ -4679,7 +6110,10 @@ fn replay_commands_on_surface(
                                     0.0,
                                     0.0,
                                     false,
-                                    control_clip.as_ref().or(clip_mask),
+                                    control_clip
+                                        .as_ref()
+                                        .map(|mask| mask.mask.as_ref())
+                                        .or(clip_mask),
                                 );
                             }
                         }
@@ -4721,7 +6155,7 @@ fn replay_commands_on_surface(
                                     *font_size,
                                     *font_weight,
                                     0,
-                                    rect.w,
+                                    control_font_stretch,
                                     line_h,
                                     &c,
                                     &super::display_list::TextDecoration::default(),
@@ -4781,7 +6215,7 @@ fn replay_commands_on_surface(
                                 *file_button_font_size,
                                 *file_button_font_weight,
                                 0,
-                                button_w,
+                                crate::types::ComputedStyle::INITIAL_FONT_STRETCH_PERCENT,
                                 button_line_h,
                                 &button_color,
                                 &super::display_list::TextDecoration::default(),
@@ -4814,57 +6248,7 @@ fn replay_commands_on_surface(
                                 *font_size,
                                 *font_weight,
                                 0,
-                                (rect.w - button_w - 8.0).max(0.0),
-                                line_h,
-                                &c,
-                                &super::display_list::TextDecoration::default(),
-                                0.0,
-                                0.0,
-                                false,
-                                clip_mask,
-                            );
-                        }
-                    }
-                    // The date and time family — a formatted field with a
-                    // picker affordance. Five input types, one control.
-                    ("input", _)
-                        if crate::widgets::DateKind::for_input(input_type.as_str()).is_some() =>
-                    {
-                        let (kind, pattern) =
-                            crate::widgets::DateKind::for_input(input_type.as_str())
-                                .expect("guarded above");
-                        let mut field = crate::widgets::DateField::new(kind, rect.w, rect.h);
-                        field.disabled = attributes.iter().any(|(k, _)| k == "disabled");
-                        field.paint(target, rect.x, rect.y, scale);
-                        if let Some((ref mut fs, ref mut sc)) = text_ctx {
-                            // An empty field shows the PATTERN, dimmed — the
-                            // same treatment a placeholder gets, and what makes
-                            // an empty date input tell you what it wants.
-                            let mut c = apply_opacity(color, a2);
-                            let shown = if value.is_empty() {
-                                c.a = (c.a as f32 * 0.5) as u8;
-                                pattern
-                            } else {
-                                value
-                            };
-                            let line_h = *font_size * 1.2;
-                            let text_y = rect.y + (rect.h - line_h).max(0.0) / 2.0;
-                            let room =
-                                (rect.w - crate::widgets::DateField::glyph_width(rect.h) - 4.0)
-                                    .max(0.0);
-                            draw_text_cmd(
-                                target,
-                                *fs,
-                                *sc,
-                                scale,
-                                rect.x + 4.0,
-                                text_y,
-                                shown,
-                                font_family,
-                                *font_size,
-                                *font_weight,
-                                0,
-                                room,
+                                control_font_stretch,
                                 line_h,
                                 &c,
                                 &super::display_list::TextDecoration::default(),
@@ -4899,6 +6283,19 @@ fn replay_commands_on_surface(
                     | ("input", "time")
                     | ("input", "datetime-local")
                     | ("textarea", _) => {
+                        let temporal = (tag == "input")
+                            .then(|| crate::widgets::DateKind::for_input(input_type))
+                            .flatten();
+                        let rect = if let Some((kind, _)) = temporal {
+                            let mut field = crate::widgets::DateField::new(kind, rect.w, rect.h);
+                            field.disabled = attributes.iter().any(|(key, _)| key == "disabled");
+                            field.paint(target, rect.x, rect.y, scale);
+                            crate::widgets::DateField::text_rect(rect)
+                        } else {
+                            rect
+                        };
+                        let placeholder =
+                            temporal.map_or(placeholder.as_str(), |(_, pattern)| pattern);
                         // Draw value or placeholder text.
                         //
                         // ⛔ **A password field must not draw what it holds.**
@@ -4912,10 +6309,17 @@ fn replay_commands_on_surface(
                         // The PLACEHOLDER is not obscured: it is not the value,
                         // and every browser shows it.
                         let masked: String;
-                        let transformed_placeholder = if value.is_empty() {
-                            placeholder_typography.as_ref().map(|style| {
+                        let typography = if value.is_empty() {
+                            placeholder_typography
+                                .as_ref()
+                                .or(value_typography.as_deref())
+                        } else {
+                            value_typography.as_deref()
+                        };
+                        let transformed_text = if input_type != "password" || value.is_empty() {
+                            typography.map(|style| {
                                 super::display_list_builder::apply_text_transform(
-                                    placeholder,
+                                    if value.is_empty() { placeholder } else { value },
                                     style.text_transform,
                                 )
                             })
@@ -4923,12 +6327,12 @@ fn replay_commands_on_surface(
                             None
                         };
                         let display_text = if value.is_empty() {
-                            transformed_placeholder.as_deref().unwrap_or(placeholder)
+                            transformed_text.as_deref().unwrap_or(placeholder)
                         } else if input_type == "password" {
                             masked = value.chars().map(|_| '\u{2022}').collect();
                             &masked
                         } else {
-                            value
+                            transformed_text.as_deref().unwrap_or(value)
                         };
                         let placeholder_alpha = if value.is_empty() {
                             placeholder_typography
@@ -4939,11 +6343,6 @@ fn replay_commands_on_surface(
                         };
                         if !display_text.is_empty() && placeholder_alpha > 0.0 {
                             if let Some((ref mut fs, ref mut sc)) = text_ctx {
-                                let typography = if value.is_empty() {
-                                    placeholder_typography.as_ref()
-                                } else {
-                                    None
-                                };
                                 let text_font_size =
                                     typography.map_or(*font_size, |style| style.font_size);
                                 let text_font_weight =
@@ -4966,10 +6365,33 @@ fn replay_commands_on_surface(
                                     apply_opacity(color, a2)
                                 };
                                 // Vertically center the text in the element
-                                let line_h =
-                                    typography.map_or(*font_size * 1.2, |style| style.line_height);
-                                let text_y = rect.y + (rect.h - line_h).max(0.0) / 2.0;
-                                let text_w =
+                                let line_h = match typography {
+                                    Some(style) => style.used_line_height(
+                                        *fs,
+                                        tag == "input"
+                                            && crate::types::input_uses_minimum_normal_line_height(
+                                                input_type,
+                                            ),
+                                    ),
+                                    _ => {
+                                        crate::layout::inline_layout::font_metrics(
+                                            Some(*fs),
+                                            text_font_family,
+                                            text_font_size,
+                                        )
+                                        .2
+                                    }
+                                };
+                                let text_y = if tag == "textarea" {
+                                    rect.y
+                                } else {
+                                    rect.y + (rect.h - line_h).max(0.0) / 2.0
+                                };
+                                let text_w = if typography
+                                    .is_some_and(|style| style.layout.is_some())
+                                {
+                                    0.0
+                                } else {
                                     crate::layout::inline_layout::measure_text_width_fs_attrs(
                                         fs,
                                         display_text,
@@ -4989,7 +6411,8 @@ fn replay_commands_on_surface(
                                         * display_text.chars().count().saturating_sub(1) as f32
                                         + word_spacing
                                             * display_text.chars().filter(|ch| *ch == ' ').count()
-                                                as f32;
+                                                as f32
+                                };
                                 let rtl = *direction == crate::types::Direction::RTL;
                                 let alignment = match text_align {
                                     crate::types::TextAlign::Center => 0.5,
@@ -4999,8 +6422,66 @@ fn replay_commands_on_surface(
                                     _ => 0.0,
                                 };
                                 let text_x = rect.x
-                                    + (rect.w - text_w).max(0.0) * alignment
-                                    + text_indent * scale * if rtl { -1.0 } else { 1.0 };
+                                    + if typography.is_some_and(|style| style.layout.is_some()) {
+                                        0.0
+                                    } else {
+                                        (rect.w - text_w).max(0.0) * alignment
+                                    }
+                                    + text_indent * if rtl { -1.0 } else { 1.0 }
+                                    - content_scroll.0;
+                                let text_y = text_y - content_scroll.1;
+                                let control_clip = clip_cache.rect(
+                                    &rect,
+                                    &[0.0; 4],
+                                    &[0.0; 4],
+                                    pw,
+                                    ph,
+                                    Transform::from_scale(scale, scale),
+                                    clip_mask_stack.last().and_then(|mask| mask.as_ref()),
+                                );
+                                let value_clip = control_clip
+                                    .as_ref()
+                                    .map(|mask| mask.mask.as_ref())
+                                    .or(clip_mask);
+                                let selection_rects: Vec<_> = match (text_selection, typography) {
+                                    (Some(selection), Some(typography)) if !value.is_empty() => {
+                                        painted_control_selection(
+                                            *fs,
+                                            display_text,
+                                            &selection.range,
+                                            typography,
+                                            line_h,
+                                            scale,
+                                        )
+                                        .into_iter()
+                                        .map(|area| {
+                                            Rect::new(
+                                                (text_x + area.x) * scale,
+                                                (text_y + area.y) * scale,
+                                                area.w * scale,
+                                                area.h * scale,
+                                            )
+                                        })
+                                        .collect()
+                                    }
+                                    _ => Vec::new(),
+                                };
+                                if let Some(selection) = text_selection {
+                                    let mut paint = Paint::default();
+                                    paint.set_color(selection.background.to_tiny_skia());
+                                    for area in &selection_rects {
+                                        if let Some(area) =
+                                            SkRect::from_xywh(area.x, area.y, area.w, area.h)
+                                        {
+                                            target.fill_rect(
+                                                area,
+                                                &paint,
+                                                Transform::identity(),
+                                                value_clip,
+                                            );
+                                        }
+                                    }
+                                }
                                 if let Some(shadow) =
                                     typography.and_then(|style| style.shadow.as_ref())
                                 {
@@ -5027,6 +6508,7 @@ fn replay_commands_on_surface(
                                             letter_spacing,
                                             word_spacing,
                                             small_caps: false,
+                                            layout: typography.and_then(|style| style.layout),
                                         },
                                         clip_mask,
                                         transform_depth == 0,
@@ -5048,7 +6530,7 @@ fn replay_commands_on_surface(
                                 } else {
                                     decoration
                                 };
-                                draw_text_cmd(
+                                draw_text_cmd_with_gradient(
                                     target,
                                     *fs,
                                     *sc,
@@ -5067,7 +6549,13 @@ fn replay_commands_on_surface(
                                     letter_spacing,
                                     word_spacing,
                                     false,
-                                    clip_mask,
+                                    value_clip,
+                                    None,
+                                    text_selection.as_ref().map(|selection| TextPaintSelection {
+                                        rects: &selection_rects,
+                                        foreground: selection.foreground,
+                                    }),
+                                    typography.and_then(|style| style.layout),
                                 );
                             }
                         }
@@ -5190,7 +6678,6 @@ fn replay_commands_on_surface(
                                 // Vertically center the text in the element
                                 let line_h = *font_size * 1.2;
                                 let text_y = rect.y + (rect.h - line_h).max(0.0) / 2.0;
-                                let text_max_w = (rect.w - 4.0).max(0.0);
                                 draw_text_cmd(
                                     target,
                                     *fs,
@@ -5203,7 +6690,7 @@ fn replay_commands_on_surface(
                                     *font_size,
                                     *font_weight,
                                     0,
-                                    text_max_w,
+                                    control_font_stretch,
                                     line_h,
                                     &c,
                                     &super::display_list::TextDecoration::default(),
@@ -5260,6 +6747,7 @@ fn replay_commands_on_surface(
                             letter_spacing: *letter_spacing,
                             word_spacing: *word_spacing,
                             small_caps: *small_caps,
+                            layout: None,
                         },
                         clip_mask,
                         transform_depth == 0,
@@ -6586,8 +8074,8 @@ struct TextGradientSampler<'a> {
     rect: Rect,
     background_color: Color,
     gradient_type: u8,
-    angle: f32,
-    direction: GradientDirection,
+    line: (f32, f32, f32),
+    average: Option<Color>,
     radial_center_x: f32,
     radial_center_y: f32,
     radial_radius_x: f32,
@@ -6613,12 +8101,21 @@ impl<'a> TextGradientSampler<'a> {
         else {
             return None;
         };
+        let line = linear_gradient_geometry(*rect, *angle, *direction);
+        let physical_length = if matches!(*gradient_type, 1 | 3) {
+            transformed_vector_length(transform, line.0 * line.2 * 2.0, line.1 * line.2 * 2.0)
+        } else {
+            transformed_vector_length(transform, *radial_radius_x, 0.0)
+                .min(transformed_vector_length(transform, 0.0, *radial_radius_y))
+        };
         Some(Self {
             rect: *rect,
             background_color: *background_color,
             gradient_type: *gradient_type,
-            angle: *angle,
-            direction: *direction,
+            line,
+            average: matches!(*gradient_type, 3 | 4)
+                .then(|| repeating_gradient_average(stops, physical_length))
+                .flatten(),
             radial_center_x: *radial_center_x,
             radial_center_y: *radial_center_y,
             radial_radius_x: *radial_radius_x,
@@ -6639,18 +8136,11 @@ impl<'a> TextGradientSampler<'a> {
         {
             return self.background_color;
         }
-        let position = if self.gradient_type == 1 {
-            let angle = match self.direction {
-                GradientDirection::Angle(_) => self.angle,
-                GradientDirection::Corner { x, y } => (x as f32 * rect.w)
-                    .atan2(-(y as f32 * rect.h))
-                    .to_degrees()
-                    .rem_euclid(360.0),
-            };
-            let rad = angle.to_radians();
-            let dx = rad.sin();
-            let dy = -rad.cos();
-            let half = ((rect.w * dx).abs() + (rect.h * dy).abs()) / 2.0;
+        if let Some(color) = self.average {
+            return composite_text_background(color, self.background_color);
+        }
+        let mut position = if matches!(self.gradient_type, 1 | 3) {
+            let (dx, dy, half) = self.line;
             if half <= 0.0 {
                 return self.background_color;
             }
@@ -6660,11 +8150,16 @@ impl<'a> TextGradientSampler<'a> {
         } else {
             let cx = rect.x + self.radial_center_x;
             let cy = rect.y + self.radial_center_y;
-            let rx = self.radial_radius_x.max(1.0);
-            let ry = self.radial_radius_y.max(1.0);
+            let rx = self.radial_radius_x;
+            let ry = self.radial_radius_y;
             (((point.x - cx) / rx).powi(2) + ((point.y - cy) / ry).powi(2)).sqrt()
         };
-        let foreground = sample_text_gradient_stops(self.stops, position);
+        if matches!(self.gradient_type, 3 | 4) && self.stops.len() >= 2 {
+            let origin = self.stops[0].1;
+            let period = self.stops.last().unwrap().1 - origin;
+            position = origin + (position - origin).rem_euclid(period);
+        }
+        let foreground = sample_gradient_stops(self.stops, position);
         composite_text_background(foreground, self.background_color)
     }
 }
@@ -6689,7 +8184,33 @@ fn composite_text_background(foreground: Color, background: Color) -> Color {
     )
 }
 
-fn sample_text_gradient_stops(stops: &[(Color, f32)], position: f32) -> Color {
+#[test]
+fn repeating_text_gradient_wraps_and_averages_like_background_paint() {
+    for kind in [3, 4] {
+        let mut command = PaintCmd::PushTextGradient {
+            rect: Rect::new(0.0, 0.0, 100.0, 61.0),
+            background_color: Color::TRANSPARENT,
+            gradient_type: kind,
+            angle: 90.0,
+            direction: GradientDirection::Angle(90.0),
+            radial_center_x: 0.0,
+            radial_center_y: 30.5,
+            radial_radius_x: 100.0,
+            radial_radius_y: 100.0,
+            stops: vec![(Color::rgb(255, 0, 0), 0.1), (Color::rgb(0, 0, 255), 0.3)],
+        };
+        let sampler = TextGradientSampler::new(&command, Transform::identity()).unwrap();
+        assert_eq!(sampler.sample(13.0, 30.0), sampler.sample(33.0, 30.0));
+        assert_eq!(sampler.sample(3.0, 30.0), sampler.sample(23.0, 30.0));
+        if let PaintCmd::PushTextGradient { stops, .. } = &mut command {
+            stops[1].1 = stops[0].1;
+        }
+        let sampler = TextGradientSampler::new(&command, Transform::identity()).unwrap();
+        assert_eq!(sampler.sample(3.0, 30.0), Color::rgb(128, 0, 128));
+    }
+}
+
+fn sample_gradient_stops(stops: &[(Color, f32)], position: f32) -> Color {
     let Some(&(first, first_at)) = stops.first() else {
         return Color::TRANSPARENT;
     };
@@ -6739,6 +8260,7 @@ fn blit_shaped_buffer_with_gradient(
     color: CTextColor,
     clip_mask: Option<&tiny_skia::Mask>,
     text_gradient: Option<&TextGradientSampler<'_>>,
+    text_selection: Option<TextPaintSelection<'_>>,
 ) {
     struct PixmapTextRenderer<'a> {
         pixmap: &'a mut Pixmap,
@@ -6749,6 +8271,7 @@ fn blit_shaped_buffer_with_gradient(
         color_alpha: u32,
         clip_mask: Option<&'a tiny_skia::Mask>,
         text_gradient: Option<&'a TextGradientSampler<'a>>,
+        text_selection: Option<TextPaintSelection<'a>>,
     }
 
     impl cosmic_text::Renderer for PixmapTextRenderer<'_> {
@@ -6772,15 +8295,40 @@ fn blit_shaped_buffer_with_gradient(
             let color_alpha = self.color_alpha;
             let clip_mask = self.clip_mask;
             let text_gradient = self.text_gradient;
+            // Color glyphs carry their own RGB; selection foreground colors
+            // apply to coverage masks, not intrinsic bitmap colors.
+            let selection = self.text_selection.filter(|_| {
+                !self
+                    .swash_cache
+                    .get_image(self.font_system, physical_glyph.cache_key)
+                    .as_ref()
+                    .is_some_and(|image| image.content == cosmic_text::SwashContent::Color)
+            });
             self.swash_cache.with_pixels(
                 self.font_system,
                 physical_glyph.cache_key,
                 color,
                 |x, y, pixel_color| {
+                    let px = origin_x + physical_glyph.x + x;
+                    let py = origin_y + physical_glyph.y + y;
+                    let selected = selection.filter(|selection| {
+                        selection
+                            .rects
+                            .iter()
+                            .any(|rect| rect.contains(px as f32 + 0.5, py as f32 + 0.5))
+                    });
+                    let (pixel_color, color_alpha) =
+                        selected.map_or((pixel_color, color_alpha), |selection| {
+                            let color = selection.foreground;
+                            (
+                                CTextColor::rgba(color.r, color.g, color.b, pixel_color.a()),
+                                color.a as u32,
+                            )
+                        });
                     blit_text_pixel_rect(
                         self.pixmap,
-                        origin_x + physical_glyph.x + x,
-                        origin_y + physical_glyph.y + y,
+                        px,
+                        py,
                         1,
                         1,
                         pixel_color,
@@ -6802,6 +8350,7 @@ fn blit_shaped_buffer_with_gradient(
         color_alpha: color.a() as u32,
         clip_mask,
         text_gradient,
+        text_selection,
     };
     buf.render(&mut renderer, color);
 }
@@ -6891,6 +8440,7 @@ struct ShadowText<'a> {
     letter_spacing: f32,
     word_spacing: f32,
     small_caps: bool,
+    layout: Option<super::display_list::ControlTextLayout>,
 }
 
 #[test]
@@ -6908,20 +8458,62 @@ fn clipped_local_text_shadows_match_full_viewport_blurs() {
                 true,
                 Transform::from_scale(scale, scale),
             );
-            for (text, style, blur) in [("Video overlay", 0, 12.0), ("Italic shadow", 1, 3.0)] {
+            for (text, style, blur, wrap_width) in [
+                ("Video overlay", 0, 12.0, None),
+                ("Italic shadow", 1, 3.0, None),
+                ("alpha beta gamma delta epsilon", 0, 3.0, Some(100.0)),
+                ("First\nSecond\nThird", 0, 3.0, None),
+            ] {
                 let shadow = ShadowText {
-                    text, font_family: "sans-serif", font_size: 19.0,
-                    font_weight: 600, font_style: style, font_stretch: 100.0,
-                    line_height: 26.0, color: Color::rgba(24, 48, 72, 185),
-                    blur, letter_spacing: 0.5, word_spacing: 1.0, small_caps: false,
+                    text,
+                    font_family: "sans-serif",
+                    font_size: 19.0,
+                    font_weight: 600,
+                    font_style: style,
+                    font_stretch: 100.0,
+                    line_height: 26.0,
+                    color: Color::rgba(24, 48, 72, 185),
+                    blur,
+                    letter_spacing: 0.5,
+                    word_spacing: 1.0,
+                    small_caps: false,
+                    layout: wrap_width.map(|width| super::display_list::ControlTextLayout {
+                        width,
+                        wrap: cosmic_text::Wrap::WordOrGlyph,
+                        align: cosmic_text::Align::Left,
+                    }),
                 };
                 let mut expected = Pixmap::new(width, height).unwrap();
                 let mut actual = Pixmap::new(width, height).unwrap();
                 expected.fill(tiny_skia::Color::from_rgba8(40, 60, 80, 255));
                 actual.fill(tiny_skia::Color::from_rgba8(40, 60, 80, 255));
-                paint_text_shadow(&mut expected, &mut fonts, &mut glyphs, scale, x, y, &shadow, Some(&mask), false);
-                paint_text_shadow(&mut actual, &mut fonts, &mut glyphs, scale, x, y, &shadow, Some(&mask), true);
-                let difference = actual.data().iter().zip(expected.data()).position(|(a, b)| a != b);
+                paint_text_shadow(
+                    &mut expected,
+                    &mut fonts,
+                    &mut glyphs,
+                    scale,
+                    x,
+                    y,
+                    &shadow,
+                    Some(&mask),
+                    false,
+                );
+                paint_text_shadow(
+                    &mut actual,
+                    &mut fonts,
+                    &mut glyphs,
+                    scale,
+                    x,
+                    y,
+                    &shadow,
+                    Some(&mask),
+                    true,
+                );
+                let difference = actual
+                    .data()
+                    .iter()
+                    .zip(expected.data())
+                    .position(|(a, b)| a != b);
                 assert_eq!(difference, None, "scale={scale}, x={x}, y={y}, text={text}");
             }
         }
@@ -6937,19 +8529,51 @@ fn benchmark_clipped_text_shadow_fallback() {
     let mut mask = tiny_skia::Mask::new(2560, 1800).unwrap();
     mask.data_mut().fill(255);
     let shadow = ShadowText {
-        text: "VP9 video playback", font_family: "sans-serif", font_size: 36.0,
-        font_weight: 700, font_style: 0, font_stretch: 100.0,
-        line_height: 44.0, color: Color::rgba(0, 0, 0, 220),
-        blur: 12.0, letter_spacing: 0.0, word_spacing: 0.0, small_caps: false,
+        text: "VP9 video playback",
+        font_family: "sans-serif",
+        font_size: 36.0,
+        font_weight: 700,
+        font_style: 0,
+        font_stretch: 100.0,
+        line_height: 44.0,
+        color: Color::rgba(0, 0, 0, 220),
+        blur: 12.0,
+        letter_spacing: 0.0,
+        word_spacing: 0.0,
+        small_caps: false,
+        layout: None,
     };
     for local in [false, true] {
-        paint_text_shadow(&mut target, &mut fonts, &mut glyphs, 2.0, 32.0, 700.0, &shadow, Some(&mask), local);
+        paint_text_shadow(
+            &mut target,
+            &mut fonts,
+            &mut glyphs,
+            2.0,
+            32.0,
+            700.0,
+            &shadow,
+            Some(&mask),
+            local,
+        );
         let start = std::time::Instant::now();
         for _ in 0..20 {
-            paint_text_shadow(&mut target, &mut fonts, &mut glyphs, 2.0, 32.0, 700.0, &shadow, Some(&mask), local);
+            paint_text_shadow(
+                &mut target,
+                &mut fonts,
+                &mut glyphs,
+                2.0,
+                32.0,
+                700.0,
+                &shadow,
+                Some(&mask),
+                local,
+            );
             std::hint::black_box(&target);
         }
-        eprintln!("clipped text shadow local={local}: {:?} / 20", start.elapsed());
+        eprintln!(
+            "clipped text shadow local={local}: {:?} / 20",
+            start.elapsed()
+        );
     }
 }
 
@@ -6969,7 +8593,7 @@ fn paint_text_shadow(
                 y: f32,
                 font_system: &mut FontSystem,
                 swash_cache: &mut SwashCache| {
-        draw_text_cmd(
+        draw_text_cmd_with_gradient(
             pixmap,
             font_system,
             swash_cache,
@@ -6989,10 +8613,13 @@ fn paint_text_shadow(
             shadow.word_spacing,
             shadow.small_caps,
             None,
+            None,
+            None,
+            shadow.layout,
         );
     };
     if shadow.blur <= 0.0 {
-        draw_text_cmd(
+        draw_text_cmd_with_gradient(
             target,
             font_system,
             swash_cache,
@@ -7012,6 +8639,9 @@ fn paint_text_shadow(
             shadow.word_spacing,
             shadow.small_caps,
             clip_mask,
+            None,
+            None,
+            shadow.layout,
         );
         return;
     }
@@ -7020,23 +8650,54 @@ fn paint_text_shadow(
     // generating it. A clip must not turn a small glyph shadow into a
     // viewport-sized blur on every video frame.
     let (left, top, width, height) = if local_shadow {
-        let text_width = crate::layout::inline_layout::measure_text_width_fs_attrs(
-            font_system,
-            shadow.text,
-            shadow.font_size,
-            cosmic_text::Weight(shadow.font_weight),
-            match shadow.font_style {
-                1 => CTextStyle::Italic,
-                2 => CTextStyle::Oblique,
-                _ => CTextStyle::Normal,
-            },
-            scale,
-            shadow.font_family,
-            crate::layout::inline_layout::stretch_from_percent(shadow.font_stretch),
-        ) + shadow.letter_spacing * shadow.text.chars().count() as f32
-            + shadow.word_spacing
-                * shadow.text.chars().filter(|c| c.is_whitespace()).count() as f32;
-        let text_height = shadow.line_height.max(shadow.font_size).max(1.0);
+        let (text_width, text_height) = if shadow.layout.is_some() {
+            let typography = super::display_list::PlaceholderTypography {
+                opacity: 1.0,
+                font_size: shadow.font_size,
+                font_weight: shadow.font_weight,
+                font_style: shadow.font_style,
+                font_family: shadow.font_family.into(),
+                font_stretch: shadow.font_stretch,
+                normal_line_height: false,
+                line_height: shadow.line_height,
+                letter_spacing: shadow.letter_spacing,
+                word_spacing: shadow.word_spacing,
+                text_transform: crate::types::TextTransform::None,
+                decoration: Default::default(),
+                shadow: None,
+                layout: shadow.layout,
+            };
+            let (width, height) = painted_control_extent(
+                font_system,
+                shadow.text,
+                &typography,
+                shadow.line_height,
+                scale,
+            );
+            (shadow.layout.unwrap().width.max(width), height)
+        } else {
+            let text_width = crate::layout::inline_layout::measure_text_width_fs_attrs(
+                font_system,
+                shadow.text,
+                shadow.font_size,
+                cosmic_text::Weight(shadow.font_weight),
+                match shadow.font_style {
+                    1 => CTextStyle::Italic,
+                    2 => CTextStyle::Oblique,
+                    _ => CTextStyle::Normal,
+                },
+                scale,
+                shadow.font_family,
+                crate::layout::inline_layout::stretch_from_percent(shadow.font_stretch),
+            ) + shadow.letter_spacing * shadow.text.chars().count() as f32
+                + shadow.word_spacing
+                    * shadow.text.chars().filter(|c| c.is_whitespace()).count() as f32;
+            (
+                text_width,
+                shadow.line_height.max(shadow.font_size).max(1.0)
+                    * shadow.text.split('\n').count() as f32,
+            )
+        };
         let pad = (shadow.blur * 4.0 + 4.0).ceil();
         let left = (x * scale - pad).floor().max(0.0) as u32;
         let top = (y * scale - pad).floor().max(0.0) as u32;
@@ -7123,6 +8784,8 @@ fn draw_text_cmd(
         _small_caps,
         clip_mask,
         None,
+        None,
+        None,
     );
 }
 
@@ -7148,11 +8811,17 @@ fn draw_text_cmd_with_gradient(
     _small_caps: bool,
     clip_mask: Option<&tiny_skia::Mask>,
     text_gradient: Option<&TextGradientSampler<'_>>,
+    text_selection: Option<TextPaintSelection<'_>>,
+    control_layout: Option<super::display_list::ControlTextLayout>,
 ) {
     if text.is_empty() {
         return;
     }
-    if word_spacing == 0.0 && text.starts_with(char::is_whitespace) {
+    if control_layout.is_none()
+        && word_spacing == 0.0
+        && !text.contains('\n')
+        && text.starts_with(char::is_whitespace)
+    {
         let visible_start = text
             .char_indices()
             .find_map(|(idx, ch)| (!ch.is_whitespace()).then_some(idx));
@@ -7196,6 +8865,8 @@ fn draw_text_cmd_with_gradient(
             _small_caps,
             clip_mask,
             text_gradient,
+            text_selection,
+            control_layout,
         );
         return;
     }
@@ -7272,23 +8943,24 @@ fn draw_text_cmd_with_gradient(
     //
     // The shaped buffer depends only on the string and the font attributes, so
     // it is cached on those. Position and colour are applied at blit time.
-    let key = {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        text_for_shape.hash(&mut h);
-        phys_px.to_bits().hash(&mut h);
-        phys_lh.to_bits().hash(&mut h);
-        font_weight.hash(&mut h);
-        font_style.hash(&mut h);
-        font_family.hash(&mut h);
-        font_stretch.to_bits().hash(&mut h);
-        _letter_spacing.to_bits().hash(&mut h);
-        word_spacing.to_bits().hash(&mut h);
-        _small_caps.hash(&mut h);
-        h.finish()
-    };
+    let key = control_layout_key(
+        shaped_text_key(
+            text_for_shape,
+            phys_px,
+            phys_lh,
+            font_weight,
+            font_style,
+            font_family,
+            font_stretch,
+            _letter_spacing,
+            word_spacing,
+            _small_caps,
+        ),
+        control_layout,
+        scale,
+    );
 
-    let (line_w, run_line_y) = SHAPED.with(|cell| {
+    let decoration_lines = SHAPED.with(|cell| {
         let mut map = cell.borrow_mut();
         // A font load changes what any string shapes to, so the whole cache
         // goes when the face count moves.
@@ -7303,58 +8975,17 @@ fn draw_text_cmd_with_gradient(
         }
 
         if !map.1.contains_key(&key) {
-            let mut buf = Buffer::new(font_system, metrics);
-            buf.set_size(font_system, None, Some((phys_lh + 4.0).max(1.0)));
-            if word_spacing != 0.0 && text_for_shape.contains(' ') {
-                let word_attrs = attrs
-                    .clone()
-                    .letter_spacing(((_letter_spacing + word_spacing) * sc) / phys_px);
-                let mut spans = Vec::new();
-                let mut rest = text_for_shape;
-                while !rest.is_empty() {
-                    match rest.find(' ') {
-                        Some(at) => {
-                            if at > 0 {
-                                spans.push((&rest[..at], attrs.clone()));
-                            }
-                            spans.push((&rest[at..at + 1], word_attrs.clone()));
-                            rest = &rest[at + 1..];
-                        }
-                        None => {
-                            spans.push((rest, attrs.clone()));
-                            break;
-                        }
-                    }
-                }
-                let spans: Vec<_> = spans
-                    .iter()
-                    .flat_map(|(s, a)| {
-                        crate::layout::inline_layout::css_font_spans(font_system, s, font_family, a)
-                    })
-                    .collect();
-                buf.set_rich_text(
-                    font_system,
-                    spans.iter().map(|(s, a)| (*s, a.as_attrs())),
-                    &attrs,
-                    Shaping::Advanced,
-                    None,
-                );
-            } else {
-                let spans = crate::layout::inline_layout::css_font_spans(
-                    font_system,
-                    text_for_shape,
-                    font_family,
-                    &attrs,
-                );
-                buf.set_rich_text(
-                    font_system,
-                    spans.iter().map(|(s, a)| (*s, a.as_attrs())),
-                    &attrs,
-                    Shaping::Advanced,
-                    None,
-                );
-            }
-            buf.shape_until_scroll(font_system, false);
+            let buf = shape_control_text(
+                font_system,
+                text_for_shape,
+                metrics,
+                &attrs,
+                font_family,
+                _letter_spacing,
+                word_spacing,
+                sc,
+                control_layout,
+            );
             map.1.insert(key, buf);
         }
         let buf = map.1.get_mut(&key).expect("just inserted");
@@ -7371,11 +9002,43 @@ fn draw_text_cmd_with_gradient(
             ct_color,
             clip_mask,
             text_gradient,
+            text_selection,
         );
+        if !decoration.underline && !decoration.overline && !decoration.strikethrough {
+            return Vec::new();
+        }
         buf.layout_runs()
-            .next()
-            .map(|r| (r.line_w, Some(r.line_y)))
-            .unwrap_or((0.0, None))
+            .map(|run| {
+                let left = run
+                    .glyphs
+                    .iter()
+                    .map(|glyph| glyph.x)
+                    .fold(f32::INFINITY, f32::min);
+                let source = if decoration.underline && decoration.skip_ink {
+                    let start = run
+                        .glyphs
+                        .iter()
+                        .map(|glyph| glyph.start)
+                        .min()
+                        .unwrap_or(0);
+                    let end = run
+                        .glyphs
+                        .iter()
+                        .map(|glyph| glyph.end)
+                        .max()
+                        .unwrap_or(start);
+                    run.text.get(start..end).unwrap_or("").to_string()
+                } else {
+                    String::new()
+                };
+                (
+                    run.line_w,
+                    run.line_y,
+                    if left.is_finite() { left } else { 0.0 },
+                    source,
+                )
+            })
+            .collect::<Vec<_>>()
     });
 
     // Draw text decorations (underline, overline, strikethrough)
@@ -7461,44 +9124,43 @@ fn draw_text_cmd_with_gradient(
         }
     };
 
-    let baseline_y = run_line_y
-        .map(|ly| phys_y + ly)
-        .unwrap_or(phys_y + phys_px * 0.82);
+    for (line_w, run_line_y, line_x, line_text) in decoration_lines {
+        let line_x = phys_x + line_x;
+        let baseline_y = phys_y + run_line_y;
 
-    if decoration.underline {
-        // Position underline below the baseline by default. `under` is lower,
-        // on the under side of the em box, matching the authored intent for
-        // scripts where baseline underlines cut through glyphs.
-        let offset = if decoration.underline_offset > 0.0 {
-            decoration.underline_offset * sc
-        } else {
-            thickness * 1.5
-        };
-        let uy = if matches!(
-            decoration.underline_position,
-            crate::types::TextUnderlinePosition::Under
-        ) {
-            baseline_y + phys_px * 0.18 + offset
-        } else {
-            baseline_y + offset
-        };
-        if decoration.skip_ink {
-            for (start, width) in underline_skip_ink_segments(text, phys_x, line_w) {
-                draw_deco_line(pixmap, start, width, uy, decoration.style);
+        if decoration.underline {
+            // Position underline below the baseline by default. `under` is lower,
+            // on the under side of the em box, matching the authored intent for
+            // scripts where baseline underlines cut through glyphs.
+            let offset = if decoration.underline_offset > 0.0 {
+                decoration.underline_offset * sc
+            } else {
+                thickness * 1.5
+            };
+            let uy = if matches!(
+                decoration.underline_position,
+                crate::types::TextUnderlinePosition::Under
+            ) {
+                baseline_y + phys_px * 0.18 + offset
+            } else {
+                baseline_y + offset
+            };
+            if decoration.skip_ink {
+                for (start, width) in underline_skip_ink_segments(&line_text, line_x, line_w) {
+                    draw_deco_line(pixmap, start, width, uy, decoration.style);
+                }
+            } else {
+                draw_deco_line(pixmap, line_x, line_w, uy, decoration.style);
             }
-        } else {
-            draw_deco_line(pixmap, phys_x, line_w, uy, decoration.style);
         }
-    }
-    if decoration.overline {
-        let oy = run_line_y.map(|ly| phys_y + ly - phys_px).unwrap_or(phys_y) - thickness;
-        draw_deco_line(pixmap, phys_x, line_w, oy, decoration.style);
-    }
-    if decoration.strikethrough {
-        let sy = run_line_y
-            .map(|ly| phys_y + ly - phys_px * 0.3)
-            .unwrap_or(phys_y + phys_px * 0.4);
-        draw_deco_line(pixmap, phys_x, line_w, sy, decoration.style);
+        if decoration.overline {
+            let oy = phys_y + run_line_y - phys_px - thickness;
+            draw_deco_line(pixmap, line_x, line_w, oy, decoration.style);
+        }
+        if decoration.strikethrough {
+            let sy = phys_y + run_line_y - phys_px * 0.3;
+            draw_deco_line(pixmap, line_x, line_w, sy, decoration.style);
+        }
     }
 }
 
@@ -8760,20 +10422,126 @@ fn simple_clip_contains_viewport(
     radius_y: &[f32; 4],
     pw: u32,
     ph: u32,
-    scale: f32,
-    scroll_x: f32,
-    scroll_y: f32,
+    ts: Transform,
 ) -> bool {
     if radius.iter().any(|r| *r > 0.5) || radius_y.iter().any(|r| *r > 0.5) {
         return false;
     }
-    let inv_scale = 1.0 / scale.max(0.001);
-    let view_w = pw as f32 * inv_scale;
-    let view_h = ph as f32 * inv_scale;
-    rect.x <= scroll_x
-        && rect.y <= scroll_y
-        && rect.right() >= scroll_x + view_w
-        && rect.bottom() >= scroll_y + view_h
+    if ts.kx != 0.0
+        || ts.ky != 0.0
+        || ts.sx <= 0.0
+        || ts.sy <= 0.0
+        || rect.w <= 0.0
+        || rect.h <= 0.0
+        || ![
+            ts.sx,
+            ts.sy,
+            ts.tx,
+            ts.ty,
+            rect.x,
+            rect.y,
+            rect.right(),
+            rect.bottom(),
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+    {
+        return false;
+    }
+    rect.x * ts.sx + ts.tx <= 0.0
+        && rect.y * ts.sy + ts.ty <= 0.0
+        && rect.right() * ts.sx + ts.tx >= pw as f32
+        && rect.bottom() * ts.sy + ts.ty >= ph as f32
+}
+
+#[test]
+fn transformed_full_viewport_clip_matches_raster_coverage() {
+    for (rect, ts) in [
+        (Rect::new(0.0, 0.0, 64.0, 48.0), Transform::identity()),
+        (
+            Rect::new(10.0, 20.0, 32.0, 24.0),
+            Transform::from_scale(2.0, 2.0).pre_translate(-10.0, -20.0),
+        ),
+        (
+            Rect::new(-2.0, -3.0, 64.0, 40.0),
+            Transform::from_scale(1.5, 1.5),
+        ),
+    ] {
+        assert!(simple_clip_contains_viewport(
+            &rect, &[0.0; 4], &[0.0; 4], 64, 48, ts
+        ));
+        let mask = build_clip_mask_with_transform(&rect, &[0.0; 4], &[0.0; 4], 64, 48, ts).unwrap();
+        assert!(mask.data().iter().all(|alpha| *alpha == 255));
+    }
+    let rect = Rect::new(0.0, 0.0, 64.0, 48.0);
+    for ts in [
+        Transform::from_translate(0.25, 0.0),
+        Transform::from_scale(0.99, 1.0),
+        Transform::from_rotate(1.0),
+        Transform::from_scale(-1.0, 1.0),
+        Transform::from_translate(f32::NAN, 0.0),
+    ] {
+        assert!(!simple_clip_contains_viewport(
+            &rect, &[0.0; 4], &[0.0; 4], 64, 48, ts
+        ));
+    }
+    assert!(!simple_clip_contains_viewport(
+        &rect,
+        &[2.0; 4],
+        &[2.0; 4],
+        64,
+        48,
+        Transform::identity()
+    ));
+}
+
+#[test]
+fn transformed_viewport_clip_preserves_parent_mask() {
+    let commands = vec![
+        PaintCmd::PushClip {
+            rect: Rect::new(0.0, 0.0, 12.0, 32.0),
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        },
+        PaintCmd::PushTransform {
+            node_id: 0,
+            transform: [2.0, 0.0, 0.0, 2.0, -8.0, -8.0],
+        },
+        PaintCmd::PushClip {
+            rect: Rect::new(4.0, 4.0, 16.0, 16.0),
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        },
+        PaintCmd::FillRect {
+            rect: Rect::new(0.0, 0.0, 32.0, 32.0),
+            color: Color::BLACK,
+            radius: [0.0; 4],
+            radius_y: [0.0; 4],
+        },
+        PaintCmd::PopClip,
+        PaintCmd::PopTransform,
+        PaintCmd::PopClip,
+    ];
+    let mut actual = Pixmap::new(32, 32).unwrap();
+    replay_commands_inner(
+        &commands,
+        &mut actual,
+        1.0,
+        None,
+        0.0,
+        0.0,
+        None,
+        None,
+        None,
+    );
+    for y in 0..32 {
+        for x in 0..32 {
+            assert_eq!(
+                actual.pixel(x, y).unwrap().alpha(),
+                if x < 12 { 255 } else { 0 }
+            );
+        }
+    }
 }
 
 fn build_polygon_clip_mask(
@@ -9022,4 +10790,305 @@ fn rounded_rect_path_corners_xy(
 #[cfg(test)]
 pub(crate) fn reduce_corner_radii(w: f32, h: f32, radii: [f32; 4]) -> [f32; 4] {
     reduce_corner_radii_xy(w, h, radii, radii).0
+}
+
+#[cfg(test)]
+mod control_cursor_tests {
+    use super::*;
+
+    fn wrapped_typography(
+        width: f32,
+        rtl: bool,
+    ) -> super::super::display_list::PlaceholderTypography {
+        let mut typography = super::super::display_list_builder::control_typography(
+            &crate::ComputedStyle::default(),
+            20.0,
+            20.0,
+        );
+        typography.font_size = 20.0;
+        typography.normal_line_height = false;
+        typography.line_height = 30.0;
+        typography.layout = Some(super::super::display_list::ControlTextLayout {
+            width,
+            wrap: cosmic_text::Wrap::WordOrGlyph,
+            align: if rtl {
+                cosmic_text::Align::Right
+            } else {
+                cosmic_text::Align::Left
+            },
+        });
+        typography
+    }
+
+    #[test]
+    fn wrapped_controls_share_paint_hit_caret_and_selection_layout() {
+        for scale in [1.0, 2.0] {
+            let mut fonts = FontSystem::new();
+            for text in [
+                "alpha beta gamma delta epsilon zeta",
+                "مرحبا بالعالم مرحبا بالعالم مرحبا",
+            ] {
+                let typography = wrapped_typography(95.0, !text.is_ascii());
+                let length = text.chars().count();
+                let (x, y) =
+                    painted_control_cursor(&mut fonts, text, length, &typography, 30.0, scale)
+                        .unwrap();
+                assert!(y >= 60.0, "soft-wrapped caret: {text:?}: ({x}, {y})");
+                let hit =
+                    painted_control_hit(&mut fonts, text, &typography, 30.0, scale, (x, y + 15.0))
+                        .unwrap();
+                assert_eq!(hit, length, "wrapped hit: {text:?}, scale={scale}");
+                let selection = painted_control_selection(
+                    &mut fonts,
+                    text,
+                    &(0..length),
+                    &typography,
+                    30.0,
+                    scale,
+                );
+                assert!(selection.len() >= 3);
+                let extent = painted_control_extent(&mut fonts, text, &typography, 30.0, scale);
+                assert!(
+                    extent.0 <= 96.0 && extent.1 >= y + 29.0,
+                    "extent={extent:?}"
+                );
+                let key = control_text_key(&fonts, text, &typography, 30.0, scale);
+                let cache_count = SHAPED.with(|cache| cache.borrow().1.len());
+                let mut target =
+                    Pixmap::new((140.0 * scale) as u32, (360.0 * scale) as u32).unwrap();
+                draw_text_cmd_with_gradient(
+                    &mut target,
+                    &mut fonts,
+                    &mut SwashCache::new(),
+                    scale,
+                    10.0,
+                    10.0,
+                    text,
+                    &typography.font_family,
+                    typography.font_size,
+                    typography.font_weight,
+                    typography.font_style,
+                    typography.font_stretch,
+                    30.0,
+                    &Color::rgba(0, 0, 0, 255),
+                    &Default::default(),
+                    0.0,
+                    0.0,
+                    false,
+                    None,
+                    None,
+                    None,
+                    typography.layout,
+                );
+                SHAPED.with(|cache| {
+                    let cache = cache.borrow();
+                    assert!(cache.1.contains_key(&key));
+                    assert_eq!(
+                        cache.1.len(),
+                        cache_count,
+                        "paint must reuse the caret layout"
+                    );
+                });
+                assert!(target.data().chunks_exact(4).any(|pixel| pixel[3] != 0));
+            }
+        }
+    }
+
+    #[test]
+    fn wrapped_navigation_and_resizing_use_visual_lines() {
+        let mut fonts = FontSystem::new();
+        let text = "alpha beta gamma delta epsilon zeta";
+        let narrow = wrapped_typography(95.0, false);
+        let mut wide = narrow.clone();
+        wide.layout.as_mut().unwrap().width = 600.0;
+        let narrow_extent = painted_control_extent(&mut fonts, text, &narrow, 30.0, 1.0);
+        assert!(narrow_extent.1 > painted_control_extent(&mut fonts, text, &wide, 30.0, 1.0).1);
+        let (down, key, goal) =
+            painted_control_vertical_motion(&mut fonts, text, 0, &narrow, 30.0, 1.0, true, None)
+                .unwrap();
+        assert!(down > 0 && down < text.len());
+        let (_, y) = painted_control_cursor(&mut fonts, text, down, &narrow, 30.0, 1.0).unwrap();
+        assert!((y - 30.0).abs() < 1.0);
+        let (up, _, _) = painted_control_vertical_motion(
+            &mut fonts,
+            text,
+            down,
+            &narrow,
+            30.0,
+            1.0,
+            false,
+            Some((down, key, goal)),
+        )
+        .unwrap();
+        assert_eq!(up, 0);
+        let mut off = narrow.clone();
+        off.layout.as_mut().unwrap().wrap = cosmic_text::Wrap::None;
+        let extent = painted_control_extent(&mut fonts, text, &off, 30.0, 1.0);
+        assert!(extent.0 > 95.0 && (extent.1 - 30.0).abs() < 1.0);
+        let rtl = wrapped_typography(95.0, true);
+        assert_eq!(
+            painted_control_cursor(&mut fonts, "", 0, &rtl, 30.0, 1.0),
+            Some((95.0, 0.0))
+        );
+    }
+
+    #[test]
+    fn selected_color_glyph_keeps_bitmap_color_while_masks_use_foreground() {
+        for content in [
+            cosmic_text::SwashContent::Color,
+            cosmic_text::SwashContent::Mask,
+        ] {
+            let mut fonts = FontSystem::new();
+            let mut buffer = shape_control_text(
+                &mut fonts,
+                "X",
+                Metrics::new(20.0, 30.0),
+                &Attrs::new(),
+                "sans-serif",
+                0.0,
+                0.0,
+                1.0,
+                None,
+            );
+            let run = buffer.layout_runs().next().unwrap();
+            let physical = run.glyphs[0].physical((0.0, run.line_y), 1.0);
+            let mut image = cosmic_text::SwashImage::new();
+            image.content = content;
+            image.placement.width = 1;
+            image.placement.height = 1;
+            image.data = if content == cosmic_text::SwashContent::Color {
+                vec![100, 150, 200, 255]
+            } else {
+                vec![255]
+            };
+            let mut cache = SwashCache::new();
+            cache.image_cache.insert(physical.cache_key, Some(image));
+            let mut pixels = Pixmap::new(64, 64).unwrap();
+            let rects = [Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 64.0,
+                h: 64.0,
+            }];
+            blit_shaped_buffer_with_gradient(
+                &mut pixels,
+                &mut fonts,
+                &mut cache,
+                &mut buffer,
+                "X",
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                CTextColor::rgb(0, 0, 0),
+                None,
+                None,
+                Some(TextPaintSelection {
+                    rects: &rects,
+                    foreground: Color::rgb(255, 0, 0),
+                }),
+            );
+            let expected = if content == cosmic_text::SwashContent::Color {
+                [100, 150, 200, 255]
+            } else {
+                [255, 0, 0, 255]
+            };
+            assert!(
+                pixels.data().chunks_exact(4).any(|pixel| pixel == expected),
+                "{content:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn control_hit_uses_shaped_multiline_and_rtl_caret_positions() {
+        let mut fonts = FontSystem::new();
+        let style = crate::types::ComputedStyle::default();
+        let typography = super::super::display_list_builder::control_typography(&style, 16.0, 16.0);
+        for scale in [1.0, 2.0] {
+            for (text, index) in [("abc\ndef", 5), ("مرحبا بالعالم", 2), ("abc\n", 4)] {
+                let (x, y) =
+                    painted_control_cursor(&mut fonts, text, index, &typography, 30.0, scale)
+                        .unwrap();
+                assert_eq!(
+                    painted_control_hit(&mut fonts, text, &typography, 30.0, scale, (x, y + 15.0)),
+                    Some(index),
+                    "{text:?} at {scale}x"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn control_hit_never_places_caret_inside_a_grapheme() {
+        use unicode_segmentation::UnicodeSegmentation;
+        let mut fonts = FontSystem::new();
+        let typography = super::super::display_list_builder::control_typography(
+            &crate::types::ComputedStyle::default(),
+            16.0,
+            16.0,
+        );
+        for scale in [1.0, 1.5, 2.0] {
+            for text in ["ae\u{301}b", "a👩‍💻b", "a🇲🇦b", "مَرْحَبًا"] {
+                let boundaries: Vec<_> = text
+                    .grapheme_indices(true)
+                    .map(|(at, _)| text[..at].chars().count())
+                    .chain(std::iter::once(text.chars().count()))
+                    .collect();
+                for x in 0..180 {
+                    if let Some(hit) = painted_control_hit(
+                        &mut fonts,
+                        text,
+                        &typography,
+                        30.0,
+                        scale,
+                        (x as f32, 15.0),
+                    ) {
+                        assert!(
+                            boundaries.contains(&hit),
+                            "{text:?}: {hit} at {x}, {scale}x"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn caret_shapes_on_a_fresh_thread_after_enter() {
+        std::thread::spawn(|| {
+            let mut fonts = FontSystem::new();
+            let typography = super::super::display_list::PlaceholderTypography {
+                opacity: 1.0,
+                font_size: 20.0,
+                font_weight: 400,
+                font_style: 0,
+                font_family: "sans-serif".into(),
+                font_stretch: 100.0,
+                normal_line_height: false,
+                line_height: 30.0,
+                letter_spacing: 0.0,
+                word_spacing: 0.0,
+                text_transform: crate::types::TextTransform::None,
+                decoration: Default::default(),
+                shadow: None,
+                layout: None,
+            };
+            for scale in [1.0, 2.0] {
+                for text in ["abc\n", "مرحبا\n", "abc\ndef"] {
+                    let cursor = text.chars().position(|c| c == '\n').unwrap() + 1;
+                    SHAPED.with(|cache| cache.borrow_mut().1.clear());
+                    let (_, y) =
+                        painted_control_cursor(&mut fonts, text, cursor, &typography, 30.0, scale)
+                            .expect("caret must not require a paint cache entry");
+                    assert!(
+                        (y - 30.0).abs() <= 1.0,
+                        "caret after Enter: {text:?}, scale={scale}, y={y}"
+                    );
+                }
+            }
+        })
+        .join()
+        .unwrap();
+    }
 }

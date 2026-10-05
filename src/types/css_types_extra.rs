@@ -660,16 +660,32 @@ pub(crate) fn shape_box_radii(
     let border = layout.border_rect;
     let font_px = style.font_size_px(root_font_px, root_font_px);
     let mut rx = [
-        style.border_top_left_radius.resolve(font_px, border.w, root_font_px),
-        style.border_top_right_radius.resolve(font_px, border.w, root_font_px),
-        style.border_bottom_right_radius.resolve(font_px, border.w, root_font_px),
-        style.border_bottom_left_radius.resolve(font_px, border.w, root_font_px),
+        style
+            .border_top_left_radius
+            .resolve(font_px, border.w, root_font_px),
+        style
+            .border_top_right_radius
+            .resolve(font_px, border.w, root_font_px),
+        style
+            .border_bottom_right_radius
+            .resolve(font_px, border.w, root_font_px),
+        style
+            .border_bottom_left_radius
+            .resolve(font_px, border.w, root_font_px),
     ];
     let mut ry = [
-        style.border_top_left_radius_y.resolve(font_px, border.h, root_font_px),
-        style.border_top_right_radius_y.resolve(font_px, border.h, root_font_px),
-        style.border_bottom_right_radius_y.resolve(font_px, border.h, root_font_px),
-        style.border_bottom_left_radius_y.resolve(font_px, border.h, root_font_px),
+        style
+            .border_top_left_radius_y
+            .resolve(font_px, border.h, root_font_px),
+        style
+            .border_top_right_radius_y
+            .resolve(font_px, border.h, root_font_px),
+        style
+            .border_bottom_right_radius_y
+            .resolve(font_px, border.h, root_font_px),
+        style
+            .border_bottom_left_radius_y
+            .resolve(font_px, border.h, root_font_px),
     ];
     (rx, ry) = reduce_shape_box_radii(border.w, border.h, rx, ry);
     let left = border.x - target.x;
@@ -736,6 +752,7 @@ pub enum ClipPathKind {
 
 impl ComputedStyle {
     pub const INITIAL_FONT_SIZE_PX: f32 = 16.0;
+    pub const INITIAL_FONT_STRETCH_PERCENT: f32 = 100.0;
 }
 
 impl Default for ComputedStyle {
@@ -812,7 +829,7 @@ impl Default for ComputedStyle {
             font_weight: FontWeight::Normal,
             relative_font_weight_base: None,
             font_style: FontStyle::Normal,
-            line_height: CssLength::Em(1.2),
+            line_height: CssLength::Auto,
             letter_spacing: CssLength::Zero,
             word_spacing: CssLength::Zero,
             text_align: TextAlign::Start,
@@ -964,7 +981,6 @@ impl Default for ComputedStyle {
             break_after: BreakValue::Auto,
             break_inside: BreakInside::Auto,
 
-            tab_size: 8,
             hyphens: Hyphens::Manual,
             widows: 2,
             orphans: 2,
@@ -1085,7 +1101,7 @@ impl Default for ComputedStyle {
             counter_increment: Vec::new(),
             counter_set: Vec::new(),
 
-            font_stretch: 100.0,
+            font_stretch: Self::INITIAL_FONT_STRETCH_PERCENT,
             font_synthesis_weight: true,
             font_synthesis_style: true,
             font_synthesis_small_caps: true,

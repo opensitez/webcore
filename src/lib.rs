@@ -165,13 +165,7 @@ fn stylesheet_cache_bytes(sheet: &css::Stylesheet) -> usize {
             .saturating_add(string_bytes(name))
             .saturating_add(string_bytes(value));
     }
-    for (name, stops) in &sheet.keyframes {
-        bytes = bytes.saturating_add(string_bytes(name)).saturating_add(
-            stops
-                .capacity()
-                .saturating_mul(std::mem::size_of::<types::KeyframeStop>()),
-        );
-    }
+    bytes = bytes.saturating_add(sheet.keyframes_heap_bytes());
     for layer in &sheet.layer_order {
         bytes = bytes.saturating_add(string_bytes(layer));
     }
@@ -338,6 +332,7 @@ fn stylesheet_has_content(sheet: &css::Stylesheet) -> bool {
         || !sheet.variables.is_empty()
         || !sheet.font_faces.is_empty()
         || !sheet.keyframes.is_empty()
+        || !sheet.keyframe_rules.is_empty()
         || !sheet.page_rules.is_empty()
         || !sheet.counter_styles.is_empty()
         || !sheet.layer_order.is_empty()
@@ -735,89 +730,21 @@ impl ImportWorker {
 
 #[derive(Default)]
 struct CssStreamBuffer {
+    input_filter: css::CssInputFilter,
     text: String,
-    scanned: usize,
-    depth: usize,
-    quote: Option<u8>,
-    escaped: bool,
-    comment: bool,
-    boundary: usize,
+    scanner: css::RuleBoundaryScanner,
 }
 
 impl CssStreamBuffer {
     fn push(&mut self, chunk: &str) -> Option<String> {
-        self.text.push_str(chunk);
-        let bytes = self.text.as_bytes();
-        let mut i = self.scanned;
-        while i < bytes.len() {
-            let b = bytes[i];
-            if self.comment {
-                if b == b'*' {
-                    if i + 1 == bytes.len() {
-                        break;
-                    }
-                    if bytes[i + 1] == b'/' {
-                        self.comment = false;
-                        i += 2;
-                        continue;
-                    }
-                }
-                i += 1;
-                continue;
-            }
-            if let Some(quote) = self.quote {
-                if self.escaped {
-                    self.escaped = false;
-                } else if b == b'\\' {
-                    self.escaped = true;
-                } else if b == quote {
-                    self.quote = None;
-                }
-                i += 1;
-                continue;
-            }
-            if b == b'/' {
-                if i + 1 == bytes.len() {
-                    break;
-                }
-                if bytes[i + 1] == b'*' {
-                    self.comment = true;
-                    i += 2;
-                    continue;
-                }
-            }
-            if b == b'\'' || b == b'"' {
-                self.quote = Some(b);
-                i += 1;
-                continue;
-            }
-            if b == b'\\' {
-                if i + 1 == bytes.len() {
-                    break;
-                }
-                i += 2;
-                continue;
-            }
-            match b {
-                b'{' => self.depth += 1,
-                b'}' => {
-                    self.depth = self.depth.saturating_sub(1);
-                    if self.depth == 0 {
-                        self.boundary = i + 1;
-                    }
-                }
-                b';' if self.depth == 0 => self.boundary = i + 1,
-                _ => {}
-            }
-            i += 1;
-        }
-        self.scanned = i;
-        if self.boundary == 0 {
+        self.input_filter.append(chunk, &mut self.text);
+        let mut boundary = 0;
+        self.scanner.scan(&self.text, false, |end| boundary = end);
+        if boundary == 0 {
             return None;
         }
-        let complete: String = self.text.drain(..self.boundary).collect();
-        self.scanned -= self.boundary;
-        self.boundary = 0;
+        let complete: String = self.text.drain(..boundary).collect();
+        self.scanner.discard_prefix(boundary);
         if complete.trim().is_empty() {
             None
         } else {
@@ -827,76 +754,18 @@ impl CssStreamBuffer {
 }
 
 fn complete_css_units(css_text: &str) -> Vec<&str> {
-    let bytes = css_text.as_bytes();
     let mut units = Vec::new();
     let mut start = 0usize;
-    let mut depth = 0usize;
-    let mut in_string = None;
-    let mut escape = false;
-    let mut in_comment = false;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let b = bytes[i];
-        if in_comment {
-            if b == b'*' && bytes.get(i + 1) == Some(&b'/') {
-                in_comment = false;
-                i += 2;
-                continue;
-            }
-            i += 1;
-            continue;
+    let mut scanner = css::RuleBoundaryScanner::default();
+    scanner.scan(css_text, true, |end| {
+        let unit = css_text[start..end].trim();
+        if unit.starts_with('@') || unit.contains('{') {
+            units.push(unit);
         }
-        if let Some(quote) = in_string {
-            if escape {
-                escape = false;
-            } else if b == b'\\' {
-                escape = true;
-            } else if b == quote {
-                in_string = None;
-            }
-            i += 1;
-            continue;
-        }
-        if b == b'/' && bytes.get(i + 1) == Some(&b'*') {
-            in_comment = true;
-            i += 2;
-            continue;
-        }
-        if b == b'\'' || b == b'"' {
-            in_string = Some(b);
-            i += 1;
-            continue;
-        }
-        if b == b'\\' {
-            i = (i + 2).min(bytes.len());
-            continue;
-        }
-        match b {
-            b'{' => depth += 1,
-            b'}' => {
-                depth = depth.saturating_sub(1);
-                if depth == 0 {
-                    let end = i + 1;
-                    if css_text[start..end].trim().contains('{') {
-                        units.push(css_text[start..end].trim());
-                    }
-                    start = end;
-                }
-            }
-            b';' if depth == 0 => {
-                let end = i + 1;
-                let unit = css_text[start..end].trim();
-                if unit.starts_with('@') {
-                    units.push(unit);
-                }
-                start = end;
-            }
-            _ => {}
-        }
-        i += 1;
-    }
+        start = end;
+    });
     let tail = css_text[start..].trim();
-    if !tail.is_empty() && depth == 0 {
+    if !tail.is_empty() {
         units.push(tail);
     }
     units
@@ -1279,6 +1148,20 @@ where
 
 #[cfg(test)]
 mod stylesheet_loader_tests {
+    #[test]
+    fn streamed_inactive_keyframes_survive_until_their_media_matches() {
+        let mut combined = crate::css::Stylesheet::default();
+        let emitted = super::stream_stylesheet_fragments(
+            "@media (min-width: 600px) { @keyframes move { to { transform: translateX(20px) } } }",
+            "https://example.org/style.css",
+            &crate::css::MediaConditions::default(),
+            |fragment| combined.append_fragment(fragment),
+        );
+        assert_eq!(emitted, 1);
+        assert!(!combined.keyframes.contains_key("move"));
+        combined.set_layer_viewport(700.0, 500.0);
+        assert!(combined.keyframes.contains_key("move"));
+    }
     use super::*;
     use std::sync::{Arc, Mutex};
 
@@ -1439,6 +1322,74 @@ mod stylesheet_loader_tests {
     }
 
     #[test]
+    fn css_stream_bad_strings_recover_without_waiting_for_eof() {
+        for newline in ["\n", "\r", "\r\n", "\x0c"] {
+            let source = format!(".bad{{content:'broken{newline};color:green}}.next{{color:blue}}");
+            for split in 0..=source.len() {
+                let mut stream = CssStreamBuffer::default();
+                let mut completed = String::new();
+                for chunk in [&source[..split], &source[split..]] {
+                    if let Some(css) = stream.push(chunk) {
+                        completed.push_str(&css);
+                    }
+                }
+                assert!(stream.text.is_empty(), "{newline:?}, split={split}");
+                let rules = css::parse_stylesheet(&completed).unwrap();
+                assert_eq!(rules.len(), 2, "{newline:?}, split={split}");
+                assert!(!rules[0].declarations.contains_key("content"));
+                assert_eq!(
+                    rules[0].declarations.get("color").map(String::as_str),
+                    Some("green")
+                );
+                assert_eq!(
+                    rules[1].declarations.get("color").map(String::as_str),
+                    Some("blue")
+                );
+            }
+        }
+        let mut stream = CssStreamBuffer::default();
+        assert!(stream.push(".a{content:'a\\\n").is_none());
+        assert!(!stream.scanner.is_top_level());
+        assert!(stream.push("b';color:red}").is_some());
+        for escape in ["\\61\n", "\\000061\n", "\\61\r\n", "\\61\x0c", "\\61 "] {
+            let source = format!(".a{{content:'{escape}b';color:red}}.next{{color:blue}}");
+            for split in 0..=source.len() {
+                let mut stream = CssStreamBuffer::default();
+                let mut complete = String::new();
+                for chunk in [&source[..split], &source[split..]] {
+                    if let Some(css) = stream.push(chunk) {
+                        complete.push_str(&css);
+                    }
+                }
+                assert!(stream.text.is_empty(), "escape={escape:?}, split={split}");
+                let rules = css::parse_stylesheet(&complete).unwrap();
+                assert_eq!(rules.len(), 2);
+                assert!(rules[0].declarations.contains_key("content"));
+            }
+        }
+    }
+
+    #[test]
+    fn css_stream_filters_code_points_before_scanning_rule_boundaries() {
+        let source = ".a\r\n{content:'é\0z';\x0c--x:'a\\\rb'}\r\n.next{color:red}";
+        let expected = ".a\n{content:'é\u{fffd}z';\n--x:'a\\\nb'}\n.next{color:red}";
+        for split in source.char_indices().map(|(i, _)| i).chain([source.len()]) {
+            let mut stream = CssStreamBuffer::default();
+            let mut drained = String::new();
+            for chunk in [&source[..split], "", &source[split..]] {
+                if let Some(complete) = stream.push(chunk) {
+                    drained.push_str(&complete);
+                }
+            }
+            drained.push_str(&stream.text);
+            assert_eq!(drained, expected, "split={split}");
+        }
+        let mut stream = CssStreamBuffer::default();
+        let complete = stream.push(".a\r{color:red}").unwrap();
+        assert_eq!(complete, ".a\n{color:red}");
+    }
+
+    #[test]
     fn css_stream_boundary_survives_chunked_comments_strings_and_escapes() {
         let css = r#"/* a } */ .a\;b { content: "} ;"; background: url("data:image/svg+xml;utf8,<svg></svg>") } /* split */ .next { color: red }"#;
         let mut stream = CssStreamBuffer::default();
@@ -1451,7 +1402,7 @@ mod stylesheet_loader_tests {
         drained.push_str(&stream.text);
         assert_eq!(drained, css);
         assert!(stream.text.is_empty());
-        assert_eq!(stream.scanned, 0);
+        assert_eq!(stream.scanner.offset, 0);
     }
 
     #[test]
@@ -1460,12 +1411,67 @@ mod stylesheet_loader_tests {
         assert!(stream.push(".large { content: '").is_none());
         for _ in 0..4096 {
             assert!(stream.push("x").is_none());
-            assert_eq!(stream.scanned, stream.text.len());
+            assert_eq!(stream.scanner.offset, stream.text.len());
         }
         let complete = stream.push("'; color: red }").unwrap();
         assert!(complete.starts_with(".large { content: '"));
         assert!(complete.ends_with("'; color: red }"));
         assert!(stream.text.is_empty());
+    }
+
+    #[test]
+    fn css_stream_urls_and_component_blocks_preserve_complete_units() {
+        for source in [
+            r#"@import url(a{;b);.a{--x:url(a};{b);color:red}.b{color:blue}"#,
+            r#".a{--x:url(a"};{b);color:red}.b{color:blue}"#,
+            r#".a{--x:u\72l(a\);{b);color:red}.b{color:blue}"#,
+            r#".a{--x:fn({a;b},[c;d]);color:red}.b{color:blue}"#,
+        ] {
+            let expected = complete_css_units(source);
+            assert_eq!(expected.len(), if source.starts_with('@') { 3 } else { 2 });
+            for split in 0..=source.len() {
+                let mut stream = CssStreamBuffer::default();
+                let mut units = Vec::new();
+                for chunk in [&source[..split], &source[split..]] {
+                    if let Some(complete) = stream.push(chunk) {
+                        units.extend(complete_css_units(&complete).into_iter().map(str::to_owned));
+                    }
+                }
+                assert!(stream.text.is_empty(), "source={source:?}, split={split}");
+                assert_eq!(units, expected, "source={source:?}, split={split}");
+            }
+        }
+    }
+
+    #[test]
+    fn css_stream_eof_recovers_the_tail_only_after_loading_finishes() {
+        for source in [
+            ".a{color:green;width:12px",
+            "@media all{.a{color:green;width:12px",
+            "@supports (display:block){.a{color:green;width:12px",
+        ] {
+            for split in 0..=source.len() {
+                let mut stream = CssStreamBuffer::default();
+                assert!(stream.push(&source[..split]).is_none());
+                assert!(stream.push(&source[split..]).is_none());
+                let mut published = Vec::new();
+                stream_stylesheet_fragments(
+                    &stream.text,
+                    "https://example.test/style.css",
+                    &css::MediaConditions::default(),
+                    |sheet| published.push(sheet),
+                );
+                assert_eq!(published.len(), 1, "source={source}, split={split}");
+                assert_eq!(published[0].rules.len(), 1);
+                assert_eq!(
+                    published[0].rules[0]
+                        .declarations
+                        .get("color")
+                        .map(String::as_str),
+                    Some("green")
+                );
+            }
+        }
     }
 
     #[test]
@@ -2414,6 +2420,8 @@ pub use fonts as woff;
 #[cfg(test)]
 pub mod tests;
 
+pub mod browser;
+pub mod inspection;
 pub use browser_view::BrowserView;
 pub use dom::HtmlEventType;
 pub use frame::{EngineCallbacks, EngineFrame};
@@ -2980,7 +2988,11 @@ fn start_async_image_fetches_with_loader(
                         }
                         types::PendingImageTarget::MaskLayer(layer_index) => {
                             let _ = html::set_decoded_mask_image_layer_for_url_on_node(
-                                node, layer_index + 1, decoded, &url, &base_url,
+                                node,
+                                layer_index + 1,
+                                decoded,
+                                &url,
+                                &base_url,
                             );
                         }
                         _ => {}
@@ -3079,7 +3091,11 @@ fn apply_ready_cached_images(doc: &mut types::Document) {
                 }
                 types::PendingImageTarget::MaskLayer(layer_index) => {
                     let _ = html::set_decoded_mask_image_layer_for_url_on_node(
-                        node, layer_index + 1, decoded, &url, &base_url,
+                        node,
+                        layer_index + 1,
+                        decoded,
+                        &url,
+                        &base_url,
                     );
                 }
             }
@@ -3151,9 +3167,16 @@ fn collect_remote_images(
         if !can_paint_resource || layer.url.is_empty() {
             continue;
         }
-        let loaded = node.mask_images.as_ref().and_then(|images| {
-            images.get_for_source(layer_index + 1, node.style.mask_source_key(layer_index + 1)?)
-        }).is_some();
+        let loaded = node
+            .mask_images
+            .as_ref()
+            .and_then(|images| {
+                images.get_for_source(
+                    layer_index + 1,
+                    node.style.mask_source_key(layer_index + 1)?,
+                )
+            })
+            .is_some();
         if loaded && layer.image_set_source.is_none() {
             continue;
         }
@@ -3215,9 +3238,11 @@ fn collect_remote_images(
         }
     }
     if can_paint_resource
-        && (node.mask_images.as_ref().and_then(|images| {
-            images.get_for_source(0, node.style.mask_source_key(0)?)
-        }).is_none()
+        && (node
+            .mask_images
+            .as_ref()
+            .and_then(|images| images.get_for_source(0, node.style.mask_source_key(0)?))
+            .is_none()
             || node.style.rare().mask_image_set_source.is_some())
         && !node.style.rare().mask_image_url.is_empty()
     {

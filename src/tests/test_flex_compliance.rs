@@ -11,6 +11,89 @@
 
 use crate::Renderer;
 
+fn anonymous_flex_whitespace_geometry(
+    text: &str,
+    white_space: &str,
+    width: f32,
+) -> (f32, f32, f32, f32) {
+    use crate::tests::harness::{find_box, parse_and_layout};
+
+    let doc = parse_and_layout(
+        &format!(
+            "<style>*{{margin:0;padding:0}}\
+             #row{{display:flex;flex-wrap:wrap;gap:4px;align-items:flex-start;\
+             align-content:flex-start;width:{width}px;font:16px/20px monospace;\
+             white-space:{white_space}}}\
+             #before,#after{{flex:none;height:20px}}\
+             #before{{width:20px}}#after{{width:80px}}</style>\
+             <div id=row><span id=before></span>{text}<span id=after></span></div>"
+        ),
+        1200.0,
+    );
+    let row = find_box(&doc.root, &|node| {
+        node.attributes.get("id").is_some_and(|id| id == "row")
+    })
+    .unwrap()
+    .layout
+    .content_rect;
+    let after = find_box(&doc.root, &|node| {
+        node.attributes.get("id").is_some_and(|id| id == "after")
+    })
+    .unwrap()
+    .layout
+    .border_rect;
+    let text = find_box(&doc.root, &|node| {
+        node.tag == "#text" && node.text.contains("label")
+    })
+    .unwrap()
+    .layout
+    .content_rect;
+    (after.x - row.x, after.y - row.y, row.h, text.w)
+}
+
+#[test]
+fn flex_anonymous_text_boundary_whitespace_does_not_add_wrap_width() {
+    // Derive a tight container from actual font metrics rather than a platform font assumption.
+    let wide = anonymous_flex_whitespace_geometry("label", "normal", 1000.0);
+    let width = wide.0 + 80.0 + 1.0;
+    for mode in ["normal", "nowrap"] {
+        let plain = anonymous_flex_whitespace_geometry("label", mode, width);
+        assert!(
+            plain.1.abs() < 0.1 && (plain.2 - 20.0).abs() < 0.1,
+            "{mode}: {plain:?}"
+        );
+        for text in [" label", "label ", " label ", "\n\t label \t\n"] {
+            let spaced = anonymous_flex_whitespace_geometry(text, mode, width);
+            assert!(
+                (spaced.0 - plain.0).abs() < 0.1
+                    && (spaced.1 - plain.1).abs() < 0.1
+                    && (spaced.2 - plain.2).abs() < 0.1
+                    && (spaced.3 - plain.3).abs() < 0.1,
+                "{mode}, {text:?}: plain={plain:?}, spaced={spaced:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn flex_anonymous_text_preserved_boundary_spaces_still_affect_sizing() {
+    let plain = anonymous_flex_whitespace_geometry("label", "normal", 1000.0);
+    let width = plain.0 + 80.0 + 1.0;
+    for mode in ["pre", "pre-wrap"] {
+        let wide = anonymous_flex_whitespace_geometry("    label    ", mode, 1000.0);
+        assert!(
+            wide.3 > plain.3 + 1.0,
+            "{mode}: plain={plain:?}, preserved={wide:?}"
+        );
+        assert!(
+            wide.0 > plain.0 + 1.0,
+            "{mode}: plain={plain:?}, preserved={wide:?}"
+        );
+        let tight = anonymous_flex_whitespace_geometry("    label    ", mode, width);
+        assert!(tight.1 >= 20.0 && tight.2 >= 40.0, "{mode}: {tight:?}");
+    }
+}
+
 /// One document and every id'd element's border box, as `(id, x, y, w, h)`.
 struct Case {
     name: &'static str,

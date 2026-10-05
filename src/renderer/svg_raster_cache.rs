@@ -88,6 +88,12 @@ fn color_bytes(color: Option<Color>) -> Option<[u8; 4]> {
 fn hash_svg_node(node: &SvgNode, hash: &mut impl Hasher) -> bool {
     std::mem::discriminant(&node.kind).hash(hash);
     node.text.hash(hash);
+    node.text_runs.len().hash(hash);
+    for run in &node.text_runs {
+        run.range.start.hash(hash);
+        run.range.end.hash(hash);
+        run.before_child.hash(hash);
+    }
     for attr in &node.attributes {
         attr.namespace.hash(hash);
         attr.name.hash(hash);
@@ -134,7 +140,9 @@ fn dom_fingerprint(root: Option<&WebCore>) -> u64 {
                     style.visibility,
                     style.color,
                     style.svg_fill,
+                    &rare.svg_fill_paint,
                     style.svg_stroke,
+                    &rare.svg_stroke_paint,
                     rare.specified_svg_paint_props,
                     &rare.svg_stroke_width,
                     &style.font_family,
@@ -298,6 +306,59 @@ pub(super) fn rasterize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mixed_svg_text_order_changes_raster_and_reference_fingerprints() {
+        let parse = |content: &str| {
+            crate::svg::parse_svg_document(&format!(
+            r#"<svg width="120" height="36"><text id="label" x="4" y="28" font-size="22" font-family="monospace">{content}</text></svg>"#,
+        )).unwrap()
+        };
+        let ordered = parse("A<tspan>B</tspan>C");
+        let reordered = parse("AC<tspan>B</tspan>");
+        assert_eq!(
+            ordered.root.children[0].text,
+            reordered.root.children[0].text
+        );
+        assert_eq!(
+            ordered.root.children[0].children,
+            reordered.root.children[0].children
+        );
+        let fingerprint = |doc: &SvgDocument| {
+            let mut hash = DefaultHasher::new();
+            assert!(hash_svg_node(&doc.root, &mut hash));
+            hash.finish()
+        };
+        assert_ne!(fingerprint(&ordered), fingerprint(&reordered));
+        let ids = |doc: &SvgDocument| {
+            document_ids_fingerprint(&HashMap::from([("label".into(), &doc.root.children[0])]))
+        };
+        assert_ne!(ids(&ordered), ids(&reordered));
+        let render = |doc: &SvgDocument| {
+            rasterize(
+                0,
+                None,
+                doc,
+                120,
+                36,
+                (120.0, 36.0),
+                Color::BLACK,
+                Some(Color::BLACK),
+                None,
+                &HashMap::new(),
+                None,
+                None,
+                0,
+                false,
+            )
+            .unwrap()
+        };
+        let first = render(&ordered);
+        let second = render(&reordered);
+        assert_ne!(first.as_slice(), second.as_slice());
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(Arc::ptr_eq(&first, &render(&ordered)));
+    }
 
     #[test]
     fn svg_dom_hash_tracks_paint_properties() {

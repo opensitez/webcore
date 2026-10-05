@@ -44,6 +44,7 @@ pub mod live_regions;
 pub mod live_text;
 pub mod logical;
 pub mod scrollbar_hit;
+pub(crate) mod select_popup;
 pub mod slots;
 pub mod transform;
 pub mod webcore_node;

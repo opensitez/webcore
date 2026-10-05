@@ -141,7 +141,24 @@ pub enum WhiteSpace {
     Nowrap,
     Pre,
     PreWrap,
+    BreakSpaces,
     PreLine,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum TabSize {
+    Number(f32),
+    Length(CssLength),
+}
+
+impl TabSize {
+    pub const INITIAL: Self = Self::Number(8.0);
+}
+
+impl Default for TabSize {
+    fn default() -> Self {
+        Self::INITIAL
+    }
 }
 
 impl Default for WhiteSpace {

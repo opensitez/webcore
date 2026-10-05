@@ -48,7 +48,9 @@ impl DecodedMaskImages {
 
     pub fn get_for_source(&self, index: usize, source: &str) -> Option<&DecodedMaskImage> {
         let stored = self.source_keys.get(index).and_then(Option::as_deref);
-        (stored.is_none() || stored == Some(source)).then(|| self.get(index)).flatten()
+        (stored.is_none() || stored == Some(source))
+            .then(|| self.get(index))
+            .flatten()
     }
 
     pub fn set_with_source(&mut self, index: usize, image: DecodedMaskImage, source: String) {
@@ -116,6 +118,8 @@ pub struct WebCore {
     /// likes, but not by pretending to be a content attribute.
     pub resolved_src: String,
     pub image_data: Option<std::sync::Arc<Vec<u8>>>,
+    /// Provenance of the currently painted image, including partial previews.
+    pub(crate) image_is_fallback: bool,
     pub image_data_width: u32,
     pub image_data_height: u32,
     pub image_width: u32,
@@ -359,9 +363,10 @@ impl WebCore {
     /// deliberately absent — sharing already requires a leaf.
     pub fn selector_state_key(&self, focused_box: u32) -> String {
         format!(
-            "{:?}|{}|{}|{}|{}|{}",
+            "{:?}|{}|{}|{}|{}|{}|{}",
             self.top_layer_kind,
             self.checkedness,
+            self.selectedness,
             self.value_state.as_deref().unwrap_or(""),
             self.data
                 .get("indeterminate")

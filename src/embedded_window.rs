@@ -46,6 +46,10 @@ pub fn with_active_window<T>(f: impl FnOnce(&Window) -> T) -> Option<T> {
     active_slot().lock().ok()?.as_ref().map(|window| f(window))
 }
 
+pub(crate) fn set_active_window(window: Option<Arc<Window>>) {
+    *active_slot().lock().expect("active window lock poisoned") = window;
+}
+
 pub fn focus() {
     with_active_window(Window::focus_window);
 }
@@ -279,7 +283,7 @@ pub fn run<P: EmbeddedPage>(width: u32, height: u32, page: P) {
         .expect("Webcore event loop failed");
 }
 
-fn key_fields(key: &Key) -> (String, String, i32) {
+pub(crate) fn key_fields(key: &Key) -> (String, String, i32) {
     match key {
         Key::Character(text) => {
             let Some(c) = text.chars().next() else {
@@ -311,6 +315,8 @@ fn key_fields(key: &Key) -> (String, String, i32) {
                 NamedKey::ArrowRight => ("ArrowRight", 39),
                 NamedKey::ArrowDown => ("ArrowDown", 40),
                 NamedKey::Delete => ("Delete", 46),
+                NamedKey::Home => ("Home", 36),
+                NamedKey::End => ("End", 35),
                 _ => ("", 0),
             };
             (name.into(), name.into(), code)

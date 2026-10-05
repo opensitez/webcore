@@ -9,6 +9,71 @@ use crate::layout::LayoutEngine;
 /// - Cascade/layout depth guards
 use crate::types::*;
 
+#[test]
+fn stylesheet_eof_recovers_rule_and_group_blocks() {
+    for source in [
+        ".a{color:green;width:12px",
+        "@media all{.a{color:green;width:12px",
+        "@supports (display:block){.a{color:green;width:12px",
+        "@layer named{.a{color:green;width:12px",
+        ".outer{.a{color:green;width:12px",
+    ] {
+        let rules = crate::css::parse_stylesheet(source).unwrap();
+        assert_eq!(rules.len(), 1, "{source}");
+        assert_eq!(
+            rules[0].declarations.get("color").map(String::as_str),
+            Some("green"),
+            "{source}"
+        );
+        assert_eq!(
+            rules[0].declarations.get("width").map(String::as_str),
+            Some("12px"),
+            "{source}"
+        );
+    }
+    assert!(
+        crate::css::parse_stylesheet(".missing-block")
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        crate::css::parser::consume_block("{color:green"),
+        ("color:green", "")
+    );
+}
+
+#[test]
+fn at_rule_names_and_preludes_follow_lexical_tokens() {
+    for source in [
+        r"@m\65 dia all{.a{color:green}}",
+        r"@s\75 pports (display:block){.a{color:green}}",
+        r"@l\61 yer named{.a{color:green}}",
+        "@MEDIA all{.a{color:green}}",
+        "@import url(a;{b);.a{color:green}",
+        "@unknown fn(a;{b});.a{color:green}",
+        "@unknown fn(a;{b}){.ignored{color:red}}.a{color:green}",
+        "@mediabogus all{.ignored{color:red}}.a{color:green}",
+        "@supports-extra (display:block){.ignored{color:red}}.a{color:green}",
+        "@ invalid{color:red}.a{color:green}",
+        r#"[data-x="{;}"]{color:green}"#,
+    ] {
+        let rules = crate::css::parse_stylesheet(source).unwrap();
+        assert_eq!(rules.len(), 1, "{source}");
+        assert_eq!(
+            rules[0].declarations.get("color").map(String::as_str),
+            Some("green"),
+            "{source}"
+        );
+    }
+    let source = format!(
+        "@{} {{.ignored{{color:red}}}}.a{{color:green}}",
+        "é".repeat(20)
+    );
+    let rules = crate::css::parse_stylesheet(&source).unwrap();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].original_selector, ".a");
+}
+
 // ─── decode_entities ─────────────────────────────────────────────────────────
 
 #[test]

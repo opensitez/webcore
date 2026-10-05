@@ -57,6 +57,7 @@ pub const SPECIFIED_SVG_STROKE_WIDTH: u16 = 1 << 2;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RareStyle {
+    pub tab_size: TabSize,
     pub clip_path_data: Option<(Arc<tiny_skia::Path>, tiny_skia::FillRule)>,
     pub clip_path_inset_round: Option<([CssLength; 4], [CssLength; 4])>,
     /// Which colour properties were declared as `currentColor`, as a bitmask
@@ -73,6 +74,9 @@ pub struct RareStyle {
     /// needs this to avoid overwriting presentation attributes with inherited
     /// DOM computed paint.
     pub specified_svg_paint_props: u16,
+    /// SVG paint-server references cannot be represented by `svg_fill`'s color.
+    pub svg_fill_paint: Option<String>,
+    pub svg_stroke_paint: Option<String>,
     pub svg_stroke_width: Option<CssLength>,
     pub grid_template_columns: Vec<GridTrackSize>,
     pub grid_template_rows: Vec<GridTrackSize>,
@@ -190,10 +194,13 @@ impl BackgroundLayer {
 
 impl RareStyle {
     pub const EMPTY: RareStyle = RareStyle {
+        tab_size: TabSize::INITIAL,
         clip_path_data: None,
         clip_path_inset_round: None,
         current_color_props: 0,
         specified_svg_paint_props: 0,
+        svg_fill_paint: None,
+        svg_stroke_paint: None,
         svg_stroke_width: None,
         logical_declarations: Vec::new(),
         transform_origin: None,
@@ -601,7 +608,6 @@ pub struct ComputedStyle {
     pub break_inside: BreakInside,
 
     // Text extras
-    pub tab_size: i32,
     pub hyphens: Hyphens,
     pub widows: i32,
     pub orphans: i32,
@@ -789,6 +795,23 @@ pub enum GradientType {
     None,
     Linear,
     Radial,
+    RepeatingLinear,
+    RepeatingRadial,
+}
+impl GradientType {
+    pub(crate) fn is_radial(self) -> bool {
+        matches!(self, Self::Radial | Self::RepeatingRadial)
+    }
+
+    pub(crate) fn paint_kind(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Linear => 1,
+            Self::Radial => 2,
+            Self::RepeatingLinear => 3,
+            Self::RepeatingRadial => 4,
+        }
+    }
 }
 impl Default for GradientType {
     fn default() -> Self {

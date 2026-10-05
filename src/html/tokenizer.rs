@@ -26,6 +26,8 @@ pub(crate) enum Token {
 pub(crate) struct CompleteToken {
     pub(crate) token: Token,
     pub(crate) end: usize,
+    /// Syntactic slash, retained separately from HTML's void-element handling.
+    pub(crate) self_closing_syntax: bool,
 }
 
 /// `html[start..end]`, clamped so a truncated tag cannot build a range that
@@ -215,6 +217,7 @@ pub(crate) fn next_complete_token(html: &str) -> Option<CompleteToken> {
         return Some(CompleteToken {
             token: Token::Text(decode_entities(&html[..end])),
             end,
+            self_closing_syntax: false,
         });
     }
 
@@ -227,6 +230,7 @@ pub(crate) fn next_complete_token(html: &str) -> Option<CompleteToken> {
         return Some(CompleteToken {
             token: Token::Doctype(inner),
             end,
+            self_closing_syntax: false,
         });
     }
     if html.len() > 1 && (bytes[1] == b'!' || bytes[1] == b'?') {
@@ -235,6 +239,7 @@ pub(crate) fn next_complete_token(html: &str) -> Option<CompleteToken> {
         return Some(CompleteToken {
             token: Token::Comment(html[data_start..end - 1].to_string()),
             end,
+            self_closing_syntax: false,
         });
     }
     if html.len() > 1 && bytes[1] == b'/' {
@@ -249,18 +254,19 @@ pub(crate) fn next_complete_token(html: &str) -> Option<CompleteToken> {
                     self_closing: true,
                 },
                 end,
+                self_closing_syntax: false,
             });
         }
         return Some(CompleteToken {
             token: Token::CloseTag { tag },
             end,
+            self_closing_syntax: false,
         });
     }
 
     let end = find_tag_end_streaming(html, 0)?;
     let tag_src = tag_slice(html, 1, end.saturating_sub(1));
-    let had_slash = tag_src.trim_end().ends_with('/');
-    let tag_src = tag_src.trim_end_matches('/').trim();
+    let (tag_src, had_slash) = split_incremental_self_closing_syntax(tag_src);
     let (tag, attrs) = parse_tag_attrs(tag_src);
     let tag = if tag == "image" {
         "img".to_string()
@@ -276,7 +282,63 @@ pub(crate) fn next_complete_token(html: &str) -> Option<CompleteToken> {
             self_closing,
         },
         end,
+        self_closing_syntax: had_slash,
     })
+}
+
+fn split_incremental_self_closing_syntax(source: &str) -> (&str, bool) {
+    let bytes = source.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'/' {
+        i += 1;
+    }
+    while i < bytes.len() {
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i == bytes.len() {
+            break;
+        }
+        if bytes[i] == b'/' {
+            if i + 1 == bytes.len() {
+                return (source[..i].trim_end(), true);
+            }
+            i += 1;
+            continue;
+        }
+        while i < bytes.len()
+            && !bytes[i].is_ascii_whitespace()
+            && !matches!(bytes[i], b'=' | b'/')
+        {
+            i += 1;
+        }
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i == bytes.len() || bytes[i] != b'=' {
+            continue;
+        }
+        i += 1;
+        while i < bytes.len() && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i < bytes.len() && matches!(bytes[i], b'\'' | b'"') {
+            let quote = bytes[i];
+            i += 1;
+            while i < bytes.len() && bytes[i] != quote {
+                i += 1;
+            }
+            if i < bytes.len() {
+                i += 1;
+            }
+        } else {
+            // HTML's unquoted-value state treats '/' as value data, even before '>'.
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+        }
+    }
+    (source, false)
 }
 
 fn complete_comment_token(html: &str) -> Option<CompleteToken> {
@@ -285,16 +347,19 @@ fn complete_comment_token(html: &str) -> Option<CompleteToken> {
         Some(CompleteToken {
             token: Token::Comment(String::new()),
             end: 5,
+            self_closing_syntax: false,
         })
     } else if rest.starts_with("->") {
         Some(CompleteToken {
             token: Token::Comment(String::new()),
             end: 6,
+            self_closing_syntax: false,
         })
     } else {
         rest.find("-->").map(|e| CompleteToken {
             token: Token::Comment(rest[..e].to_string()),
             end: 4 + e + 3,
+            self_closing_syntax: false,
         })
     }
 }
@@ -654,4 +719,49 @@ pub(crate) fn should_auto_close(current: &str, new_tag: &str) -> bool {
 pub(crate) fn is_non_visual(tag: &str) -> bool {
     // script/noscript are handled separately (content passed to host hook).
     matches!(tag, "head" | "meta" | "link")
+}
+
+#[cfg(test)]
+mod incremental_self_closing_tests {
+    use super::*;
+
+    #[test]
+    fn incremental_tokens_preserve_slash_without_changing_html_self_closing_rules() {
+        for markup in ["<rect/>", "<path />", "<div/>"] {
+            let complete = next_complete_token(markup).unwrap();
+            assert_eq!(complete.end, markup.len());
+            assert!(complete.self_closing_syntax);
+            assert!(matches!(complete.token, Token::OpenTag { self_closing: false, .. }));
+        }
+        for markup in ["<rect>", "<rect data-note='/' >", "text", "<!-- / -->", "</rect>"] {
+            assert!(!next_complete_token(markup).unwrap().self_closing_syntax);
+        }
+        assert!(next_complete_token("<rect /").is_none());
+        let complete = next_complete_token("<rect />").unwrap();
+        assert!(complete.self_closing_syntax);
+        let complete = next_complete_token("<svg/>").unwrap();
+        assert!(complete.self_closing_syntax);
+        assert!(matches!(complete.token, Token::OpenTag { self_closing: true, .. }));
+    }
+
+    #[test]
+    fn incremental_self_closing_slash_is_not_unquoted_attribute_data() {
+        for (markup, expected_value, expected_syntax) in [
+            ("<g data-v=x/>", "x/", false),
+            ("<g data-v=x//>", "x//", false),
+            ("<g data-v=/>", "/", false),
+            ("<g data-v=x/ >", "x/", false),
+            ("<g data-v=x />", "x", true),
+            ("<g data-v=x / >", "x", false),
+            ("<g data-v='x'/>", "x", true),
+            ("<g data-v=\"x\"/>", "x", true),
+            ("<g data-v='x/'/>", "x/", true),
+            ("<g data-v='x/'>", "x/", false),
+        ] {
+            let complete = next_complete_token(markup).unwrap();
+            assert_eq!(complete.self_closing_syntax, expected_syntax, "{markup}");
+            let Token::OpenTag { attrs, .. } = complete.token else { panic!("expected start tag") };
+            assert_eq!(attrs.get("data-v").map(String::as_str), Some(expected_value), "{markup}");
+        }
+    }
 }

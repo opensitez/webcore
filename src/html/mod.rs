@@ -25,6 +25,7 @@ pub mod public_api;
 pub mod serializer;
 pub mod streaming;
 pub mod table_normalize;
+pub mod temporal;
 pub mod tokenizer;
 pub mod validity;
 

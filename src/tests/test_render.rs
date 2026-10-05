@@ -1,5 +1,450 @@
 // Pixel-level render tests for blend modes, gradients, and layout.
 #[test]
+fn native_control_scrollbars_paint_only_when_content_overflows() {
+    for scale in [1.0, 2.0] {
+        for overflow in ["auto", "hidden"] {
+            for control in [
+                "<select id=control size=2 multiple><option>A</option><option>B</option><option>C</option><option>D</option><option>E</option><option>F</option></select>",
+                "<textarea id=control rows=2>A\nB\nC\nD\nE\nF</textarea>",
+            ] {
+                let mut renderer = Renderer::new();
+                let mut doc = renderer.load_html_vp(&format!(
+                    "<style>body{{margin:0;background:white}}#control{{display:block;width:150px;height:40px;padding:0;border:0;background:white;overflow:{overflow};scrollbar-color:red lime}}</style>{control}"
+                ), 200.0, 80.0);
+                let id = doc.get_element_by_id("control").unwrap();
+                let node = doc.get_node(id).unwrap();
+                assert!(node.layout.scroll_height > node.layout.content_rect.h);
+                let rect = node.layout.padding_rect;
+                let width = node.style.scrollbar_width_px();
+                let mut pixels =
+                    Pixmap::new((200.0 * scale) as u32, (80.0 * scale) as u32).unwrap();
+                renderer.render(&mut doc, &mut pixels, scale);
+                let sample = |y| {
+                    pixel(
+                        &pixels,
+                        ((rect.x + rect.w - width / 2.0) * scale) as u32,
+                        ((rect.y + y) * scale) as u32,
+                    )
+                };
+                assert_eq!(
+                    sample(30.0),
+                    if overflow == "auto" {
+                        (0, 255, 0, 255)
+                    } else {
+                        (255, 255, 255, 255)
+                    },
+                    "{control}: scrollbar track at {scale}x, overflow:{overflow}"
+                );
+                if overflow == "auto" {
+                    assert_eq!(sample(5.0), (255, 0, 0, 255), "native scrollbar thumb");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn listbox_native_content_preserves_css_background() {
+    for scale in [1.0, 2.0] {
+        let mut renderer = Renderer::new();
+        let mut doc = renderer.load_html_vp(
+            "<style>body{margin:0;background:white}select{width:150px;height:100px;padding:0;border:0;background:rgb(20,60,80);color:white}</style><select size=4 multiple><option>A</option></select>",
+            200.0, 120.0);
+        let mut pixels = Pixmap::new((200.0 * scale) as u32, (120.0 * scale) as u32).unwrap();
+        renderer.render(&mut doc, &mut pixels, scale);
+        assert_eq!(
+            pixel(&pixels, (100.0 * scale) as u32, (70.0 * scale) as u32),
+            (20, 60, 80, 255),
+            "native listbox content must not repaint an author background white"
+        );
+    }
+}
+
+#[test]
+fn temporal_label_font_does_not_change_with_control_width() {
+    for scale in [1.0, 2.0] {
+        let mut widths = Vec::new();
+        for width in [180, 300] {
+            let mut renderer = Renderer::new();
+            let mut doc = renderer.load_html_vp(&format!(
+                "<style>body{{margin:0;background:white}}input{{display:block;width:{width}px;\
+                 height:40px;padding:0;border:0;font:20px sans-serif;color:red;background:white}}</style>\
+                 <input type='datetime-local' value='2026-10-05T12:30'>"
+            ), 360.0, 80.0);
+            let mut pixels = Pixmap::new((360.0 * scale) as u32, (80.0 * scale) as u32).unwrap();
+            renderer.render(&mut doc, &mut pixels, scale);
+            // Compare only the date prefix, away from the trailing picker clipping.
+            let signature: Vec<_> = (0..(100.0 * scale) as u32)
+                .flat_map(|x| {
+                    let pixels = &pixels;
+                    (0..pixels.height()).map(move |y| {
+                        let (r, g, b, a) = pixel(pixels, x, y);
+                        r > 100 && g < 100 && b < 100 && a > 100
+                    })
+                })
+                .collect();
+            assert!(
+                signature.iter().any(|&ink| ink),
+                "temporal field must paint its value"
+            );
+            widths.push(signature);
+        }
+        assert_eq!(
+            widths[0], widths[1],
+            "control width is not a font stretch percentage"
+        );
+    }
+}
+
+#[test]
+fn progress_native_fill_obeys_rtl_clipping_and_appearance() {
+    for scale in [1.0, 2.0] {
+        for direction in ["ltr", "rtl"] {
+            let mut renderer = Renderer::new();
+            let mut doc = renderer.load_html_vp(&format!(
+                "<style>body{{margin:0;background:white}}progress{{display:block;width:100px;\
+                 height:20px;direction:{direction}}}</style><progress value='0.25' max='0' min='100'></progress>"
+            ), 160.0, 60.0);
+            let mut pixels = Pixmap::new((160.0 * scale) as u32, (60.0 * scale) as u32).unwrap();
+            renderer.render(&mut doc, &mut pixels, scale);
+            let left = pixel(&pixels, (12.0 * scale) as u32, (10.0 * scale) as u32);
+            let right = pixel(&pixels, (88.0 * scale) as u32, (10.0 * scale) as u32);
+            let (filled, empty) = if direction == "rtl" {
+                (right, left)
+            } else {
+                (left, right)
+            };
+            assert!(
+                filled.2 > filled.0 + 100,
+                "native fraction starts at the directional edge"
+            );
+            assert!(
+                empty.0 > 200 && empty.1 > 200,
+                "invalid max uses 1, ignoring min"
+            );
+        }
+        for contents in [
+            "<progress style='appearance:none' value='0.5'></progress>",
+            "<div style='width:40px;height:20px;overflow:hidden'><progress value='1'></progress></div>",
+        ] {
+            let mut renderer = Renderer::new();
+            let mut doc = renderer.load_html_vp(&format!(
+                "<style>body{{margin:0;background:white}}progress{{display:block;width:100px;height:20px}}</style>{contents}"
+            ),160.0,60.0);
+            let mut pixels = Pixmap::new((160.0 * scale) as u32, (60.0 * scale) as u32).unwrap();
+            renderer.render(&mut doc, &mut pixels, scale);
+            assert_eq!(
+                pixel(&pixels, (80.0 * scale) as u32, (10.0 * scale) as u32),
+                (255, 255, 255, 255),
+                "native gauge must not paint through clipping or appearance:none"
+            );
+        }
+    }
+}
+
+#[test]
+fn native_caret_follows_multiline_and_rtl_shaped_glyphs() {
+    for scale in [1.0, 2.0] {
+        for (tag, direction, value, cursor, second_line) in [
+            ("textarea", "ltr", "abc\ndef", 4, true),
+            ("input", "rtl", "مرحبا", 0, false),
+            ("input", "rtl", "مرحبا", 5, false),
+        ] {
+            let mut renderer = Renderer::new();
+            let markup = if tag == "textarea" {
+                format!("<textarea id='control'>{value}</textarea>")
+            } else {
+                format!("<input id='control' value='{value}'>")
+            };
+            let mut doc = renderer.load_html_vp(&format!(
+                "<style>body{{margin:0;background:white}}input,textarea{{display:block;\
+                 width:200px;height:90px;padding:0;border:0;font:20px sans-serif;\
+                 line-height:30px;direction:{direction};background:white;color:black;caret-color:cyan}}</style>{markup}"
+            ), 240.0, 120.0);
+            let id = doc.get_element_by_id("control").unwrap();
+            doc.focused_box = id;
+            assert!(doc.set_selection_range(id, cursor as u32, cursor as u32, None));
+            let mut pixels = Pixmap::new((240.0 * scale) as u32, (120.0 * scale) as u32).unwrap();
+            renderer.render(&mut doc, &mut pixels, scale);
+            let caret = (0..pixels.height())
+                .find_map(|y| {
+                    (0..pixels.width())
+                        .find(|&x| {
+                            let (r, g, b, a) = pixel(&pixels, x, y);
+                            a > 200 && r < 30 && g > 200 && b > 200
+                        })
+                        .map(|x| (x as f32 / scale, y as f32 / scale))
+                })
+                .expect("native control must paint its caret");
+            if second_line {
+                let first_ink_y = (0..pixels.height())
+                    .find(|&y| {
+                        (0..pixels.width()).any(|x| {
+                            let (r, g, b, a) = pixel(&pixels, x, y);
+                            a > 200 && r < 40 && g < 40 && b < 40
+                        })
+                    })
+                    .expect("textarea must paint its first line");
+                assert!(
+                    first_ink_y as f32 / scale < 30.0,
+                    "textarea text starts on the first line, not centered below its caret"
+                );
+                assert!(
+                    (caret.1 - 30.0).abs() <= 1.0,
+                    "textarea caret follows its second line: {caret:?}"
+                );
+                assert!(caret.0 < 2.0, "second line begins at its own origin");
+            } else if cursor == 0 {
+                assert!(
+                    caret.0 > 190.0,
+                    "RTL logical start is the right edge: {caret:?}"
+                );
+            } else {
+                assert!(
+                    caret.0 < 190.0,
+                    "RTL logical end follows the shaped left edge: {caret:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn input_caret_tracks_masked_value_alignment_and_indent_at_device_scale() {
+    for scale in [1.0, 2.0] {
+        let mut positions = Vec::new();
+        for (value, align, indent) in [
+            ("WWWW", "left", 0),
+            ("iiii", "left", 0),
+            ("iiii", "left", 30),
+            ("iiii", "center", 0),
+        ] {
+            let mut renderer = Renderer::new();
+            let mut doc = renderer.load_html_vp(&format!(
+                "<style>body{{margin:0;background:white}}input{{display:block;width:180px;height:40px;\
+                 padding:0;border:0;color:black;background:white;font:20px sans-serif;caret-color:cyan;\
+                 text-align:{align};text-indent:{indent}px}}</style><input id='i' type='password' value='{value}'>"
+            ), 240.0, 100.0);
+            let id = doc.get_element_by_id("i").unwrap();
+            doc.focused_box = id;
+            assert!(doc.set_selection_range(id, 4, 4, None));
+            let mut pixels = Pixmap::new((240.0 * scale) as u32, (100.0 * scale) as u32).unwrap();
+            renderer.render(&mut doc, &mut pixels, scale);
+            let x = (0..pixels.width())
+                .find(|&x| {
+                    (0..pixels.height()).any(|y| {
+                        let (r, g, b, a) = pixel(&pixels, x, y);
+                        a > 200 && r < 30 && g > 200 && b > 200
+                    })
+                })
+                .expect("focused input must paint its author-colored caret");
+            positions.push(x as f32 / scale);
+        }
+        assert!(
+            (positions[0] - positions[1]).abs() <= 1.0,
+            "password caret must measure masked glyphs, not raw characters"
+        );
+        assert!(
+            (positions[2] - positions[1] - 30.0).abs() <= 1.0,
+            "caret indent must remain in CSS pixels"
+        );
+        assert!(
+            positions[3] > positions[1] + 40.0,
+            "caret must follow centered value text"
+        );
+    }
+}
+
+#[test]
+fn input_caret_auto_does_not_override_author_text_color() {
+    let mut renderer = Renderer::new();
+    let mut doc = renderer.load_html_vp("<style>body{margin:0;background:white}input{width:100px;height:40px;padding:0;border:0;background:black;color:black}</style><input id='i'>", 200.0, 100.0);
+    doc.focused_box = doc.get_element_by_id("i").unwrap();
+    let mut pixels = Pixmap::new(200, 100).unwrap();
+    renderer.render(&mut doc, &mut pixels, 1.0);
+    for y in 10..30 {
+        for x in 0..4 {
+            assert_eq!(
+                pixel(&pixels, x, y),
+                (0, 0, 0, 255),
+                "caret-color:auto uses currentColor even when it matches the background"
+            );
+        }
+    }
+}
+
+#[test]
+fn closed_select_reserves_indicator_space_for_ltr_rtl_and_appearance_none() {
+    for scale in [1.0, 2.0] {
+        for (direction, appearance) in [("ltr", "auto"), ("rtl", "auto"), ("ltr", "none")] {
+            let mut renderer = Renderer::new();
+            let mut doc = renderer.load_html_vp(&format!(
+                "<style>body{{margin:0;background:white}}select{{display:block;width:100px;height:40px;padding:0;border:0;\
+                 color:red;font-size:20px;direction:{direction};appearance:{appearance}}}</style>\
+                 <select id='s'><option>MMMMMMMMMMMM</option></select>"),200.0,100.0);
+            let mut pixels =
+                tiny_skia::Pixmap::new((200.0 * scale) as u32, (100.0 * scale) as u32).unwrap();
+            renderer.render(&mut doc, &mut pixels, scale);
+            let has_text = (0..pixels.height()).any(|y| {
+                (0..pixels.width()).any(|x| {
+                    let (r, g, b, _) = pixel(&pixels, x, y);
+                    r > 150 && g < 100 && b < 100
+                })
+            });
+            assert!(
+                has_text,
+                "select must paint its text: direction={direction}, appearance={appearance}, scale={scale}"
+            );
+            let rect = doc
+                .get_node(doc.get_element_by_id("s").unwrap())
+                .unwrap()
+                .layout
+                .content_rect;
+            if appearance == "auto" {
+                let left = if direction == "rtl" {
+                    rect.x
+                } else {
+                    rect.right() - 30.0
+                };
+                for y in 0..(12.0 * scale) as u32 {
+                    for x in (left * scale) as u32..((left + 30.0) * scale) as u32 {
+                        let (r, g, b, _) = pixel(&pixels, x, y);
+                        assert!(
+                            !(r > 150 && g < 100 && b < 100),
+                            "label entered indicator region: direction={direction} scale={scale}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn select_popup_clips_scrolled_rows_without_painting_outside_its_bounds() {
+    for scale in [1.0, 2.0] {
+        let mut renderer = Renderer::new();
+        let options: String = (0..30)
+            .map(|i| format!("<option>Option {i}</option>"))
+            .collect();
+        let mut doc = renderer.load_html_vp(&format!(
+            "<style>body{{margin:0;background:#f03040}}select{{position:absolute;left:180px;top:160px;width:80px;height:25px;background:white}}</style>\
+             <select id='s'>{options}</select>"), 320.0, 200.0);
+        doc.viewport_w = 320.0;
+        doc.viewport_h = 200.0;
+        doc.open_select = doc.get_element_by_id("s").unwrap();
+        let mut pixels =
+            tiny_skia::Pixmap::new((320.0 * scale) as u32, (200.0 * scale) as u32).unwrap();
+        for scroll in [0.0, 100.0, 10000.0] {
+            doc.dropdown_scroll = scroll;
+            renderer.render(&mut doc, &mut pixels, scale);
+            for (x, y) in [(150.0, 80.0), (175.0, 190.0), (319.0, 190.0)] {
+                assert_eq!(
+                    pixel(&pixels, (x * scale) as u32, (y * scale) as u32),
+                    (240, 48, 64, 255),
+                    "popup must not spill at scale={scale}, scroll={scroll}, ({x},{y})"
+                );
+            }
+        }
+        doc.open_select = 0;
+        renderer.render(&mut doc, &mut pixels, scale);
+        assert_eq!(
+            pixel(&pixels, (200.0 * scale) as u32, (80.0 * scale) as u32),
+            (240, 48, 64, 255),
+            "closing popup must restore retained page pixels at scale {scale}"
+        );
+    }
+}
+
+#[test]
+fn control_text_indent_is_in_css_pixels_at_device_scale() {
+    for placeholder in [false, true] {
+        for scale in [1.0, 2.0] {
+            let mut renderer = Renderer::new();
+            let attr = if placeholder {
+                "placeholder='MMMM'"
+            } else {
+                "value='MMMM'"
+            };
+            let mut doc = renderer.load_html_vp(&format!(
+                "<style>body{{margin:0;background:white}}input{{display:block;width:180px;height:40px;\
+                 padding:0;border:0;background:white;color:red;font-size:20px;text-indent:30px}}\
+                 input::placeholder{{color:red;opacity:1}}</style><input {attr}>"), 240.0, 100.0);
+            let mut pixels =
+                tiny_skia::Pixmap::new((240.0 * scale) as u32, (100.0 * scale) as u32).unwrap();
+            renderer.render(&mut doc, &mut pixels, scale);
+            let first_red = (0..pixels.width())
+                .find(|&x| {
+                    (0..pixels.height()).any(|y| {
+                        let (r, g, b, _) = pixel(&pixels, x, y);
+                        r > 150 && g < 100 && b < 100
+                    })
+                })
+                .expect("control text must paint");
+            let css_x = first_red as f32 / scale;
+            assert!(
+                (30.0..40.0).contains(&css_x),
+                "placeholder={placeholder} scale={scale}: x={css_x}"
+            );
+        }
+    }
+}
+
+#[test]
+fn select_popup_paints_live_hover_and_inherited_text_color_at_device_scale() {
+    for scale in [1.0, 2.0] {
+        let mut renderer = Renderer::new();
+        let mut doc = renderer.load_html_vp(
+            "<style>body{margin:0;background:white}select{width:180px;color:red;font-size:20px}</style>\
+             <select id='select'><option selected>First</option><option>MMMM</option><option>Third</option></select>",
+            300.0, 240.0,
+        );
+        let id = doc.get_element_by_id("select").unwrap();
+        let rect = doc.get_node(id).unwrap().layout.border_rect;
+        doc.open_select = id;
+        let mut pixels =
+            tiny_skia::Pixmap::new((300.0 * scale) as u32, (240.0 * scale) as u32).unwrap();
+        renderer.render(&mut doc, &mut pixels, scale);
+        let second_y = rect.bottom() + 4.0 + 36.0;
+        let mut red_pixels = 0;
+        for y in (second_y * scale) as u32..((second_y + 36.0) * scale) as u32 {
+            for x in 8 * scale as u32..120 * scale as u32 {
+                let (r, g, b, _) = pixel(&pixels, x, y);
+                if r > 150 && g < 100 && b < 100 {
+                    red_pixels += 1;
+                }
+            }
+        }
+        assert!(
+            red_pixels > 10,
+            "option must retain red computed color at scale {scale}"
+        );
+        doc.dropdown_hover_idx = 1;
+        renderer.render(&mut doc, &mut pixels, scale);
+        assert_eq!(
+            pixel(
+                &pixels,
+                (150.0 * scale) as u32,
+                ((second_y + 18.0) * scale) as u32
+            ),
+            (229, 239, 255, 255),
+            "live hover at scale {scale}"
+        );
+        doc.dropdown_hover_idx = -1;
+        renderer.render(&mut doc, &mut pixels, scale);
+        assert_ne!(
+            pixel(
+                &pixels,
+                (150.0 * scale) as u32,
+                ((second_y + 18.0) * scale) as u32
+            ),
+            (229, 239, 255, 255),
+            "hover must clear at scale {scale}"
+        );
+    }
+}
+
+#[test]
 fn retained_animated_gradient_respects_rounded_overflow_during_damage_replay() {
     for scale in [1.0, 2.0] {
         let mut renderer = Renderer::new();
@@ -492,6 +937,316 @@ fn pixel(pm: &Pixmap, x: u32, y: u32) -> (u8, u8, u8, u8) {
     let g = ((d[idx + 1] as u32 * 255) / a as u32) as u8;
     let b = ((d[idx + 2] as u32 * 255) / a as u32) as u8;
     (r, g, b, a)
+}
+
+#[test]
+fn radial_ellipse_pixels_follow_both_authored_radii_at_device_scale() {
+    for (rx, ry) in [(40.0_f32, 10.0_f32), (10.0, 40.0)] {
+        for scale in [1.0_f32, 2.0] {
+            let mut renderer = Renderer::new();
+            let mut doc = renderer.load_html(
+                &format!(
+                    "<style>html,body{{margin:0}}div{{width:120px;height:100px;\
+                     background:radial-gradient(ellipse {rx}px {ry}px at 60px 50px,red,blue)}}\
+                     </style><div></div>"
+                ),
+                120.0,
+            );
+            let mut pixmap = Pixmap::new((120.0 * scale) as u32, (100.0 * scale) as u32).unwrap();
+            renderer.render(&mut doc, &mut pixmap, scale);
+            for (x, y) in [(60.0, 50.0), (65.0, 55.0), (80.0, 50.0), (60.0, 70.0)] {
+                let px = (x * scale) as u32;
+                let py = (y * scale) as u32;
+                let dx = (px as f32 + 0.5) / scale - 60.0;
+                let dy = (py as f32 + 0.5) / scale - 50.0;
+                let position = ((dx / rx).powi(2) + (dy / ry).powi(2)).sqrt().min(1.0);
+                let (red, green, blue, alpha) = pixel(&pixmap, px, py);
+                assert!(
+                    (red as f32 - 255.0 * (1.0 - position)).abs() <= 4.0
+                        && green == 0
+                        && (blue as f32 - 255.0 * position).abs() <= 4.0
+                        && alpha == 255,
+                    "radii=({rx},{ry}) scale={scale} point=({x},{y}): \
+                     rgba=({red},{green},{blue},{alpha}), expected fraction={position}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn gradient_pixels_preserve_stops_outside_the_nominal_line() {
+    for (image, x, y, expected) in [
+        (
+            "linear-gradient(to right,red -100%,blue 100%)",
+            0,
+            50,
+            (127, 0, 128),
+        ),
+        (
+            "linear-gradient(to right,red,blue 200%)",
+            119,
+            50,
+            (128, 0, 127),
+        ),
+        (
+            "linear-gradient(to right,red -100%,blue 200%)",
+            59,
+            50,
+            (128, 0, 127),
+        ),
+        (
+            "linear-gradient(to right,red -100%,blue -50%)",
+            60,
+            50,
+            (0, 0, 255),
+        ),
+        (
+            "linear-gradient(to right,red 150%,blue 200%)",
+            60,
+            50,
+            (255, 0, 0),
+        ),
+        (
+            "linear-gradient(to right,red -100%,red 50%,blue 50%,blue 200%)",
+            59,
+            50,
+            (255, 0, 0),
+        ),
+        (
+            "linear-gradient(to right,red -100%,red 50%,blue 50%,blue 200%)",
+            60,
+            50,
+            (0, 0, 255),
+        ),
+        (
+            "linear-gradient(to right,red -100%,transparent)",
+            0,
+            50,
+            (255, 128, 128),
+        ),
+        (
+            "radial-gradient(circle 20px at 50px 50px,red,blue 200%)",
+            79,
+            50,
+            (67, 0, 188),
+        ),
+        (
+            "radial-gradient(circle 20px at 50px 50px,red -100%,blue)",
+            50,
+            50,
+            (123, 0, 132),
+        ),
+    ] {
+        let pixmap = render_html(
+            &format!(
+                "<style>html,body{{margin:0;background:white}}div{{width:120px;height:100px;background:{image}}}</style><div></div>"
+            ),
+            120,
+            100,
+        );
+        let (red, green, blue, alpha) = pixel(&pixmap, x, y);
+        assert!(
+            red.abs_diff(expected.0) <= 4
+                && green.abs_diff(expected.1) <= 4
+                && blue.abs_diff(expected.2) <= 4
+                && alpha == 255,
+            "{image} at ({x},{y}): rgba=({red},{green},{blue},{alpha}), expected={expected:?}"
+        );
+    }
+}
+
+#[test]
+fn repeating_gradients_preserve_period_and_phase() {
+    for radial in [false, true] {
+        for origin in [-10, 0, 10] {
+            let image = if radial {
+                format!(
+                    "repeating-radial-gradient(circle 20px at left center,red {origin}px,blue {}px)",
+                    origin + 20
+                )
+            } else {
+                format!(
+                    "repeating-linear-gradient(to right,red {origin}px,blue {}px)",
+                    origin + 20
+                )
+            };
+            for scale in [1.0_f32, 2.0] {
+                let mut renderer = Renderer::new();
+                let mut doc = renderer.load_html(&format!("<style>html,body{{margin:0}}div{{width:100px;height:61px;background:{image}}}</style><div></div>"), 100.0);
+                let mut pixmap =
+                    Pixmap::new((100.0 * scale) as u32, (61.0 * scale) as u32).unwrap();
+                renderer.render(&mut doc, &mut pixmap, scale);
+                for x in [3, 13, 23, 43, 63, 83] {
+                    let px = x * scale as u32;
+                    let py = 30 * scale as u32;
+                    let distance = if radial {
+                        ((px as f32 + 0.5) / scale).hypot((py as f32 + 0.5) / scale - 30.5)
+                    } else {
+                        (px as f32 + 0.5) / scale
+                    };
+                    let fraction = (distance - origin as f32).rem_euclid(20.0) / 20.0;
+                    let (r, g, b, a) = pixel(&pixmap, px, py);
+                    assert!(
+                        (r as f32 - 255.0 * (1.0 - fraction)).abs() < 6.0
+                            && g == 0
+                            && (b as f32 - 255.0 * fraction).abs() < 6.0
+                            && a == 255,
+                        "{image}, scale={scale}, x={x}, rgba={r},{g},{b},{a}, fraction={fraction}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn repeating_gradient_unrenderable_periods_use_premultiplied_average() {
+    for (image, expected) in [
+        (
+            "repeating-linear-gradient(to right,red 10px,blue 10px)",
+            (128, 0, 128),
+        ),
+        (
+            "repeating-linear-gradient(to right,red 0px,blue .01px)",
+            (128, 0, 128),
+        ),
+        (
+            "repeating-linear-gradient(to right,red 0px,white 0px,blue 0px)",
+            (191, 128, 191),
+        ),
+        (
+            "repeating-linear-gradient(to right,transparent 10px,red 10px)",
+            (255, 127, 127),
+        ),
+        (
+            "repeating-radial-gradient(ellipse 20px 0px,red 0px,blue 20px)",
+            (128, 0, 128),
+        ),
+    ] {
+        let mut renderer = Renderer::new();
+        let mut doc = renderer.load_html(&format!("<style>html,body{{margin:0;background:white}}div{{width:100px;height:61px;background:{image}}}</style><div></div>"), 100.0);
+        let mut pixmap = Pixmap::new(100, 61).unwrap();
+        renderer.render(&mut doc, &mut pixmap, 1.0);
+        for (x, y) in [(1, 1), (50, 30), (99, 60)] {
+            let (r, g, b, a) = pixel(&pixmap, x, y);
+            assert!(
+                r.abs_diff(expected.0) <= 2
+                    && g.abs_diff(expected.1) <= 2
+                    && b.abs_diff(expected.2) <= 2
+                    && a == 255,
+                "{image}: {r},{g},{b},{a}"
+            );
+        }
+    }
+}
+
+#[test]
+fn degenerate_radial_gradients_follow_shape_specific_limits() {
+    for (descriptor, stops, mirrored) in [
+        ("circle 0px", "red,blue", false),
+        ("circle closest-side at left center", "red,blue", false),
+        ("ellipse 0px 20px", "red,blue", false),
+        ("ellipse 20px 0px", "red,blue", false),
+        ("ellipse 0px 0px", "red,blue", false),
+        ("ellipse 0px 20px", "red 0px,blue 20px", true),
+        ("ellipse 0px 0px", "red 0px,blue 20px", true),
+    ] {
+        for scale in [1.0_f32, 2.0] {
+            let mut renderer = Renderer::new();
+            let mut doc = renderer.load_html(
+                &format!("<style>html,body{{margin:0}}div{{width:100px;height:61px;background:radial-gradient({descriptor},{stops})}}</style><div></div>"), 100.0,
+            );
+            let mut pixmap = Pixmap::new((100.0 * scale) as u32, (61.0 * scale) as u32).unwrap();
+            renderer.render(&mut doc, &mut pixmap, scale);
+            for (x, y) in [(49, 0), (49, 30), (49, 60), (39, 0), (60, 60), (1, 30)] {
+                let px = x * scale as u32;
+                let py = y * scale as u32;
+                let fraction = if mirrored {
+                    (((px as f32 + 0.5) / scale - 50.0).abs() / 20.0).min(1.0)
+                } else {
+                    1.0
+                };
+                let (red, green, blue, alpha) = pixel(&pixmap, px, py);
+                assert!(
+                    (red as f32 - 255.0 * (1.0 - fraction)).abs() <= 5.0
+                        && green == 0
+                        && (blue as f32 - 255.0 * fraction).abs() <= 5.0
+                        && alpha == 255,
+                    "{descriptor}, {stops}, scale={scale}, ({px},{py}): rgba=({red},{green},{blue},{alpha}), fraction={fraction}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn radial_gradient_preserves_positive_subpixel_radii() {
+    for (descriptor, rx, ry) in [
+        ("circle .000001px", 0.000001_f32, 0.000001_f32),
+        ("circle .25px", 0.25_f32, 0.25_f32),
+        ("ellipse .25px .75px", 0.25, 0.75),
+        ("ellipse .75px .25px", 0.75, 0.25),
+        ("circle closest-side", 0.25, 0.25),
+        ("ellipse closest-side", 0.25, 0.75),
+    ] {
+        for scale in [1.0_f32, 2.0, 4.0] {
+            let mut renderer = Renderer::new();
+            let mut doc = renderer.load_html(
+                &format!("<style>html,body{{margin:0}}div{{width:10px;height:10px;background:radial-gradient({descriptor} at .25px .75px,red,blue 400%)}}</style><div></div>"),
+                10.0,
+            );
+            let mut pixmap = Pixmap::new((10.0 * scale) as u32, (10.0 * scale) as u32).unwrap();
+            renderer.render(&mut doc, &mut pixmap, scale);
+            for (x, y) in [(0, 0), (1, 1), (0, 2)] {
+                let dx = (x as f32 + 0.5) / scale - 0.25;
+                let dy = (y as f32 + 0.5) / scale - 0.75;
+                let fraction = (((dx / rx).powi(2) + (dy / ry).powi(2)).sqrt() / 4.0).min(1.0);
+                let (red, green, blue, alpha) = pixel(&pixmap, x, y);
+                assert!(
+                    (red as f32 - 255.0 * (1.0 - fraction)).abs() <= 4.0
+                        && green == 0
+                        && (blue as f32 - 255.0 * fraction).abs() <= 4.0
+                        && alpha == 255,
+                    "{descriptor} scale={scale} sample=({x},{y}): rgba=({red},{green},{blue},{alpha}), expected fraction={fraction}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn radial_gradient_outside_center_paints_closest_corner_ellipse() {
+    let rx = 20.0 * std::f32::consts::SQRT_2;
+    let ry = 50.0 * std::f32::consts::SQRT_2;
+    for (cx, sample_x) in [(-20.0_f32, 0_u32), (140.0, 119)] {
+        for scale in [1.0_f32, 2.0] {
+            let mut renderer = Renderer::new();
+            let mut doc = renderer.load_html(
+                &format!(
+                    "<style>html,body{{margin:0}}div{{width:120px;height:100px;\
+                     background:radial-gradient(ellipse closest-corner at {cx}px 50px,red,blue)}}\
+                     </style><div></div>"
+                ),
+                120.0,
+            );
+            let mut pixmap = Pixmap::new((120.0 * scale) as u32, (100.0 * scale) as u32).unwrap();
+            renderer.render(&mut doc, &mut pixmap, scale);
+            let x = (sample_x as f32 * scale) as u32;
+            let y = (50.0 * scale) as u32;
+            let dx = (x as f32 + 0.5) / scale - cx;
+            let dy = (y as f32 + 0.5) / scale - 50.0;
+            let position = ((dx / rx).powi(2) + (dy / ry).powi(2)).sqrt();
+            let (red, green, blue, alpha) = pixel(&pixmap, x, y);
+            assert!(
+                (red as f32 - 255.0 * (1.0 - position)).abs() <= 4.0
+                    && green == 0
+                    && (blue as f32 - 255.0 * position).abs() <= 4.0
+                    && alpha == 255,
+                "center={cx} scale={scale}: rgba=({red},{green},{blue},{alpha}), expected fraction={position}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -3944,7 +4699,7 @@ is a volcano in the southern Peruvian <a>Andes</a>, rising above <a>Arequipa</a>
 }
 
 #[test]
-fn flex_text_boundary_preserves_separator_space_before_icon() {
+fn flex_text_boundary_discards_collapsed_space_before_icon() {
     use super::harness::find_box;
 
     let mut renderer = Renderer::new();
@@ -3968,13 +4723,6 @@ fn flex_text_boundary_preserves_separator_space_before_icon() {
         crate::types::FontStyle::Normal,
         "Arial, sans-serif",
     );
-    let space_w = renderer.layout_engine().measure_text_cached(
-        " ",
-        18.0,
-        crate::types::FontWeight::Value(700),
-        crate::types::FontStyle::Normal,
-        "Arial, sans-serif",
-    );
     let title = find_box(&doc.root, &|n| {
         n.attributes.get("id").map(String::as_str) == Some("title")
     })
@@ -3984,11 +4732,10 @@ fn flex_text_boundary_preserves_separator_space_before_icon() {
     })
     .expect("#icon");
     assert!(
-        icon.layout.content_rect.x >= title.layout.content_rect.x + text_w + space_w * 0.5,
-        "flex text/icon boundary lost collapsed space: title_x={} text_w={} space_w={} icon_x={}",
+        (icon.layout.content_rect.x - title.layout.content_rect.x - text_w).abs() < 1.0,
+        "anonymous flex text gained boundary space: title_x={} text_w={} icon_x={}",
         title.layout.content_rect.x,
         text_w,
-        space_w,
         icon.layout.content_rect.x
     );
 }

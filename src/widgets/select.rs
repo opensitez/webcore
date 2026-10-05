@@ -3,6 +3,17 @@
 use super::WidgetColors;
 use tiny_skia::*;
 
+const INDICATOR_INLINE_FACTOR: f32 = 1.5;
+const LABEL_INSET_FACTOR: f32 = 0.25;
+
+pub(crate) fn indicator_inline_size(font_px: f32) -> f32 {
+    font_px * INDICATOR_INLINE_FACTOR
+}
+
+pub(crate) fn label_inline_inset(font_px: f32) -> f32 {
+    font_px * LABEL_INSET_FACTOR
+}
+
 pub struct Select {
     pub options: Vec<String>,
     pub selected_index: usize,

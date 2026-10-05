@@ -757,13 +757,8 @@ fn layout_block_pass(
     let (left_gutter, right_gutter) = node.style.scrollbar_gutter_edges(reserve_v_scrollbar);
     let gutter_width = sbw * (u8::from(left_gutter) + u8::from(right_gutter)) as f32;
     let child_content_w = (content_w - gutter_width).max(0.0);
-    let _query_container_scope = engine.enter_query_container(
-        node,
-        content_w,
-        rbox.content_height,
-        font_px,
-        root_font_px,
-    );
+    let _query_container_scope =
+        engine.enter_query_container(node, content_w, rbox.content_height, font_px, root_font_px);
 
     // Auto margin centering (CSS 2.1 §10.3.3 / css-sizing): resolve after
     // min/max-width clamping so `width:auto; max-width:...; margin:0 auto`
@@ -1584,7 +1579,12 @@ fn layout_block_pass(
         node.layout.line_cache.push(LayoutLine {
             text_start: 0,
             text_length: 0,
-            x: content_x,
+            x: content_x
+                + if node.style.direction == Direction::RTL {
+                    content_w
+                } else {
+                    0.0
+                },
             y: content_y,
             width: 0.0,
             height: line_h,

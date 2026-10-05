@@ -134,13 +134,8 @@ pub fn layout_inline_block(
         }
     };
     let content_w = raw_w.max(min_w).min(max_w);
-    let _query_container_scope = engine.enter_query_container(
-        node,
-        content_w,
-        rbox.content_height,
-        font_px,
-        root_font_px,
-    );
+    let _query_container_scope =
+        engine.enter_query_container(node, content_w, rbox.content_height, font_px, root_font_px);
 
     // Auto margin centering (CSS 2.1 §10.3.3)
     // Applies only to block-level non-replaced elements in normal flow.
@@ -507,16 +502,22 @@ pub fn layout_inline_block(
             && rbox.content_height.is_none()
             && (is_prose_tag || is_contenteditable);
         if add_placeholder {
-            let line_h = font_px * 1.2;
+            let (ascent, descent) = strut_metrics(engine, node, font_px, root_font_px);
+            let line_h = ascent + descent;
             node.layout.line_cache = vec![LayoutLine {
                 text_start: text_offset,
                 text_length: 0,
-                x: content_x,
+                x: content_x
+                    + if node.style.direction == Direction::RTL {
+                        content_w
+                    } else {
+                        0.0
+                    },
                 y: content_y,
                 width: 0.0,
                 height: line_h,
-                ascent: font_px,
-                descent: font_px * 0.2,
+                ascent,
+                descent,
                 extra_space_per_word: 0.0,
                 text_x_offset: 0.0,
                 visual_segments: Vec::new(),
@@ -529,9 +530,8 @@ pub fn layout_inline_block(
         // must still produce a line-height of vertical space, just like it would
         // inside a paragraph.
         let br_h = if node.tag == "br" { font_px * 1.2 } else { 0.0 };
-        let eff_placeholder_fpx = font_px;
         let placeholder_h = if add_placeholder {
-            eff_placeholder_fpx * 1.2
+            node.layout.line_cache[0].height
         } else {
             br_h
         };
@@ -690,9 +690,13 @@ pub fn layout_inline_block(
     let mut out_of_flow_static_pos: Vec<(Vec<usize>, f32, f32)> = Vec::new(); // (path, x, y)
     let mut inline_fragment_rects: std::collections::HashMap<Vec<usize>, Vec<Rect>> =
         std::collections::HashMap::new();
+    let mut inline_fragment_metrics = std::collections::HashMap::new();
     let mut old_line_idx = 0usize;
     let mut ends_with_break = false;
     let mut loop_guard = 0usize;
+    // Line positioning changes geometry, not the block's text. Keep one
+    // pass-local snapshot, and avoid collecting it when early-stop reuses lines.
+    let mut flat_text = None;
 
     while item_idx < items.len() {
         loop_guard += 1;
@@ -709,7 +713,10 @@ pub fn layout_inline_block(
                         item_idx += 1;
                         continue;
                     };
-                    let float_w = child.layout.margin_rect.w.max(0.0);
+                    let float_w = (child.layout.border_rect.w
+                        + child.layout.resolved_margin_left
+                        + child.layout.resolved_margin_right)
+                        .max(0.0);
                     let float_h = child.layout.margin_rect.h;
                     let side = if child.style.float == crate::types::Float::Right {
                         FloatSide::Right
@@ -732,7 +739,11 @@ pub fn layout_inline_block(
                             content_w,
                             root_font_px,
                         ),
-                        crate::layout::float_shape_reference(&child.style, &child.layout, root_font_px),
+                        crate::layout::float_shape_reference(
+                            &child.style,
+                            &child.layout,
+                            root_font_px,
+                        ),
                     );
                     let dx = content_x + placed.x - child.layout.margin_rect.x;
                     let dy = fc.origin_y + placed.y - child.layout.margin_rect.y;
@@ -868,7 +879,11 @@ pub fn layout_inline_block(
                             content_w,
                             root_font_px,
                         ),
-                        crate::layout::float_shape_reference(&child.style, &child.layout, root_font_px),
+                        crate::layout::float_shape_reference(
+                            &child.style,
+                            &child.layout,
+                            root_font_px,
+                        ),
                     );
                     let dx = content_x + placed.x - child.layout.margin_rect.x;
                     let dy = fc.origin_y + placed.y - child.layout.margin_rect.y;
@@ -1116,7 +1131,7 @@ pub fn layout_inline_block(
             }
         }
 
-        let flat_text = collect_flat_text(node);
+        let flat_text = flat_text.get_or_insert_with(|| collect_flat_text(node));
 
         // Collect atomic positions and inline fragment rects on this line
         {
@@ -1160,7 +1175,14 @@ pub fn layout_inline_block(
                         let ar = Rect::new(atomic_x, ay, box_w, box_h);
                         for len in 1..path.len() {
                             let p = path[..len].to_vec();
-                            add_inline_fragment(&mut inline_fragment_rects, p, ar);
+                            let metrics =
+                                inline_fragment_metrics.entry(p.clone()).or_insert_with(|| {
+                                    inline_owner_metrics(engine, node, &p, font_px, root_font_px)
+                                });
+                            let fragment = metrics.as_ref().map_or(ar, |metrics| {
+                                inline_owner_fragment(ar, cursor_y + line_asc, metrics)
+                            });
+                            add_inline_fragment(&mut inline_fragment_rects, p, fragment);
                         }
                         seen_atomic_before_text = true;
                     }
@@ -1193,7 +1215,14 @@ pub fn layout_inline_block(
                         let r = Rect::new(text_x, cursor_y, item.advance, line_h);
                         for len in 1..=path.len() {
                             let p = path[..len].to_vec();
-                            add_inline_fragment(&mut inline_fragment_rects, p, r);
+                            let metrics =
+                                inline_fragment_metrics.entry(p.clone()).or_insert_with(|| {
+                                    inline_owner_metrics(engine, node, &p, font_px, root_font_px)
+                                });
+                            let fragment = metrics.as_ref().map_or(r, |metrics| {
+                                inline_owner_fragment(r, cursor_y + line_asc, metrics)
+                            });
+                            add_inline_fragment(&mut inline_fragment_rects, p, fragment);
                         }
                     }
                     _ => {}
@@ -1361,15 +1390,22 @@ pub fn layout_inline_block(
 
     // Empty block with no content: add one empty line so the caret has a home.
     if line_cache.is_empty() && items.is_empty() {
+        let (ascent, descent) = strut_metrics(engine, node, font_px, root_font_px);
+        let height = ascent + descent;
         line_cache.push(LayoutLine {
             text_start: text_offset,
             text_length: 0,
-            x: content_x,
+            x: content_x
+                + if node.style.direction == Direction::RTL {
+                    content_w
+                } else {
+                    0.0
+                },
             y: cursor_y,
             width: 0.0,
-            height: font_px * 1.2,
-            ascent: font_px * 1.2,
-            descent: 0.0,
+            height,
+            ascent,
+            descent,
             extra_space_per_word: 0.0,
             text_x_offset: 0.0,
             visual_segments: Vec::new(),
@@ -1377,7 +1413,7 @@ pub fn layout_inline_block(
             has_clamped_continuation: false,
             char_x_key: 0,
         });
-        cursor_y += font_px * 1.2;
+        cursor_y += height;
     }
 
     // A final <br> terminates its line; it does not create another ordinary
@@ -1388,15 +1424,22 @@ pub fn layout_inline_block(
             || value.eq_ignore_ascii_case("plaintext-only")
     });
     if ends_with_break && editing_host {
+        let (ascent, descent) = strut_metrics(engine, node, font_px, root_font_px);
+        let height = ascent + descent;
         line_cache.push(LayoutLine {
             text_start: text_offset,
             text_length: 0,
-            x: content_x,
+            x: content_x
+                + if node.style.direction == Direction::RTL {
+                    content_w
+                } else {
+                    0.0
+                },
             y: cursor_y,
             width: 0.0,
-            height: font_px * 1.2,
-            ascent: font_px * 1.2,
-            descent: 0.0,
+            height,
+            ascent,
+            descent,
             extra_space_per_word: 0.0,
             text_x_offset: 0.0,
             visual_segments: Vec::new(),
@@ -1404,7 +1447,7 @@ pub fn layout_inline_block(
             has_clamped_continuation: false,
             char_x_key: 0,
         });
-        cursor_y += font_px * 1.2;
+        cursor_y += height;
     }
 
     if let Some(limit) = node.style.line_clamp {
@@ -1879,6 +1922,106 @@ fn measure_metrics(items: &[InlineItem], strut_asc: f32, strut_desc: f32) -> (f3
     (max_asc + max_desc, max_asc, max_desc)
 }
 
+struct InlineOwnerMetrics {
+    ascent: f32,
+    descent: f32,
+    baseline_offset: f32,
+}
+
+fn inline_owner_metrics(
+    engine: &LayoutEngine,
+    root: &WebCore,
+    path: &[usize],
+    font_px: f32,
+    root_font_px: f32,
+) -> Option<InlineOwnerMetrics> {
+    let mut owner = root;
+    let mut owner_font_px = font_px;
+    let mut vertical_align = VerticalAlign::Baseline;
+    for &index in path {
+        owner = owner.effective_children().get(index)?;
+        owner_font_px = owner.style.font_size_px(owner_font_px, root_font_px);
+        if owner.style.vertical_align != VerticalAlign::Baseline {
+            vertical_align = owner.style.vertical_align.clone();
+        }
+    }
+    if owner.is_text_node()
+        || owner.style.display != Display::Inline
+        || is_atomic_inline_replaced(owner)
+        || matches!(
+            vertical_align,
+            VerticalAlign::Top | VerticalAlign::Bottom | VerticalAlign::Middle
+        )
+    {
+        return None;
+    }
+    let font_system = unsafe { engine.font_system.map(|fs| &mut *fs) };
+    let (ascent, descent, _) = font_metrics(font_system, &owner.style.font_family, owner_font_px);
+    let line_height = resolve_line_height(
+        engine,
+        &owner.style.line_height,
+        owner_font_px,
+        root_font_px,
+    )
+    .unwrap_or(ascent + descent);
+    let shift = vertical_align_shift(&vertical_align, owner_font_px, line_height);
+    let baseline_offset = if vertical_align == VerticalAlign::Sub {
+        shift
+    } else {
+        -shift
+    };
+    Some(InlineOwnerMetrics {
+        ascent,
+        descent,
+        baseline_offset,
+    })
+}
+
+fn inline_owner_fragment(rect: Rect, baseline: f32, metrics: &InlineOwnerMetrics) -> Rect {
+    // Inline content edges use the owner's font, not its descendants' line or replaced boxes.
+    Rect::new(
+        rect.x,
+        baseline + metrics.baseline_offset - metrics.ascent,
+        rect.w,
+        metrics.ascent + metrics.descent,
+    )
+}
+
+#[cfg(test)]
+mod inline_owner_fragment_tests {
+    use super::*;
+
+    #[test]
+    fn inline_owner_content_edges_ignore_descendant_height_and_leading() {
+        let metrics = InlineOwnerMetrics {
+            ascent: 18.0,
+            descent: 4.0,
+            baseline_offset: 0.0,
+        };
+        for descendant in [
+            Rect::new(8.0, 54.0, 28.0, 20.0),
+            Rect::new(8.0, 52.0, 20.0, 23.0),
+            Rect::new(8.0, 10.0, 20.0, 80.0),
+        ] {
+            let fragment = inline_owner_fragment(descendant, 74.0, &metrics);
+            assert_eq!((fragment.x, fragment.w), (descendant.x, descendant.w));
+            assert_eq!((fragment.y, fragment.h), (56.0, 22.0));
+        }
+        let raised = InlineOwnerMetrics {
+            baseline_offset: -3.0,
+            ..metrics
+        };
+        let fragment = inline_owner_fragment(Rect::new(0.0, 0.0, 20.0, 20.0), 74.0, &raised);
+        assert_eq!((fragment.y, fragment.h), (53.0, 22.0));
+        let lowered = InlineOwnerMetrics {
+            baseline_offset: 3.0,
+            ..raised
+        };
+        let fragment = inline_owner_fragment(Rect::new(0.0, 0.0, 20.0, 20.0), 74.0, &lowered);
+        assert_eq!((fragment.y, fragment.h), (59.0, 22.0));
+    }
+}
+
 fn add_inline_fragment(
     fragments: &mut std::collections::HashMap<Vec<usize>, Vec<Rect>>,
     path: Vec<usize>,
@@ -2064,6 +2207,7 @@ pub struct InlineItem {
     pub height: f32,
     pub is_space: bool,
     pub breakable: bool,
+    pub break_after: bool,
     pub emergency_break: EmergencyBreak,
 }
 
@@ -2217,6 +2361,7 @@ fn collect_items_inner(
             height: 0.0,
             is_space: false,
             breakable: false,
+            break_after: false,
             emergency_break: EmergencyBreak::None,
         });
         return;
@@ -2232,6 +2377,7 @@ fn collect_items_inner(
             height: 0.0,
             is_space: false,
             breakable: false,
+            break_after: false,
             emergency_break: EmergencyBreak::None,
         });
         return;
@@ -2349,6 +2495,7 @@ fn collect_items_inner(
             height: line_h,
             is_space: false,
             breakable: false,
+            break_after: false,
             emergency_break: EmergencyBreak::None,
         });
         return;
@@ -2434,6 +2581,7 @@ fn collect_items_inner(
             height: box_h,
             is_space: false,
             breakable: true,
+            break_after: false,
             emergency_break: EmergencyBreak::None,
         });
         *previous_collapsible_space = false;
@@ -2537,6 +2685,7 @@ fn collect_items_inner(
             height: 0.0,
             is_space: false,
             breakable: false,
+            break_after: false,
             emergency_break: EmergencyBreak::None,
         });
     }
@@ -2609,6 +2758,7 @@ fn collect_items_inner(
             height: 0.0,
             is_space: false,
             breakable: false,
+            break_after: false,
             emergency_break: EmergencyBreak::None,
         });
     }
@@ -2661,6 +2811,7 @@ fn emit_generated_inline_content(
             height: 0.0,
             is_space: false,
             breakable: false,
+            break_after: false,
             emergency_break: EmergencyBreak::None,
         });
     }
@@ -2717,6 +2868,7 @@ fn emit_generated_inline_content(
                 height: 0.0,
                 is_space: false,
                 breakable: false,
+                break_after: false,
                 emergency_break: EmergencyBreak::None,
             });
         }
@@ -2741,6 +2893,7 @@ fn emit_generated_inline_content(
             height: 0.0,
             is_space: false,
             breakable: false,
+            break_after: false,
             emergency_break: EmergencyBreak::None,
         });
     }
@@ -2807,7 +2960,7 @@ fn tokenize_text(
 
     let preserve_newlines = matches!(
         white_space,
-        WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::PreLine
+        WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::BreakSpaces | WhiteSpace::PreLine
     );
 
     let measure_transformed = |engine: &LayoutEngine, s: &str| -> (f32, f32) {
@@ -2837,7 +2990,16 @@ fn tokenize_text(
         };
         let ch_len = ch.map_or(0, |c| c.len_utf8());
         let is_nl = matches!(ch, Some('\n')) && preserve_newlines;
-        let is_space = ch.is_some_and(|c| !is_nl && c.is_ascii_whitespace());
+        let is_space = ch.is_some_and(|c| {
+            !is_nl
+                && (c.is_ascii_whitespace()
+                    || (white_space == WhiteSpace::BreakSpaces
+                        && matches!(
+                            c,
+                            '\u{1680}' | '\u{2000}'
+                                ..='\u{200a}' | '\u{202f}' | '\u{205f}' | '\u{3000}'
+                        )))
+        });
 
         if (at_end || is_space || is_nl) && i > word_start {
             let first_word_item = items.len();
@@ -2874,6 +3036,7 @@ fn tokenize_text(
                         height: line_h,
                         is_space: false,
                         breakable: break_before_word || rel > 0,
+                        break_after: false,
                         emergency_break: EmergencyBreak::None,
                     });
                 }
@@ -2898,6 +3061,7 @@ fn tokenize_text(
                                 height: line_h,
                                 is_space: false,
                                 breakable: starts_after_break,
+                                break_after: false,
                                 emergency_break: EmergencyBreak::None,
                             });
                         }
@@ -2925,6 +3089,7 @@ fn tokenize_text(
                                 height: line_h,
                                 is_space: false,
                                 breakable: starts_after_break,
+                                break_after: false,
                                 emergency_break: EmergencyBreak::None,
                             });
                             segment_start = rel;
@@ -2945,6 +3110,7 @@ fn tokenize_text(
                                 height: line_h,
                                 is_space: false,
                                 breakable: starts_after_break,
+                                break_after: false,
                                 emergency_break: EmergencyBreak::None,
                             });
                             segment_start = next_rel;
@@ -2967,6 +3133,7 @@ fn tokenize_text(
                         height: line_h,
                         is_space: false,
                         breakable: starts_after_break,
+                        break_after: false,
                         emergency_break: EmergencyBreak::None,
                     });
                 }
@@ -2984,6 +3151,7 @@ fn tokenize_text(
                     height: line_h,
                     is_space: false,
                     breakable: break_before_word,
+                    break_after: false,
                     emergency_break: EmergencyBreak::None,
                 });
             }
@@ -3068,6 +3236,7 @@ fn tokenize_text(
                 height: line_h,
                 is_space: false,
                 breakable: false,
+                break_after: false,
                 emergency_break: EmergencyBreak::None,
             });
             items.push(InlineItem {
@@ -3078,6 +3247,7 @@ fn tokenize_text(
                 height: line_h,
                 is_space: false,
                 breakable: false,
+                break_after: false,
                 emergency_break: EmergencyBreak::None,
             });
             i += ch_len;
@@ -3089,8 +3259,17 @@ fn tokenize_text(
             // Emit one space item per space character so caret byte offsets stay in sync.
             // (Previously all consecutive spaces were collapsed to one rendered item,
             //  causing the caret to drift right while text stayed left.)
+            let preserved = matches!(
+                white_space,
+                WhiteSpace::Pre | WhiteSpace::PreWrap | WhiteSpace::BreakSpaces
+            );
+            let space_text = if preserved && ch != Some('\t') {
+                &text[i..i + ch_len]
+            } else {
+                " "
+            };
             let space_w = engine.measure_text_cached_with_stretch(
-                " ",
+                space_text,
                 font_px,
                 font_weight,
                 font_style,
@@ -3103,7 +3282,7 @@ fn tokenize_text(
             // In white-space:pre / pre-wrap, spaces are significant (not collapsible).
             // Mark them as non-space so break_one_line doesn't strip leading whitespace,
             // and non-breakable in pre mode (only \n breaks lines).
-            let preserve_spaces = matches!(white_space, WhiteSpace::Pre | WhiteSpace::PreWrap);
+            let preserve_spaces = preserved;
             let collapsible_space = !preserve_spaces;
             let advance = if collapsible_space && *previous_collapsible_space {
                 0.0
@@ -3121,7 +3300,11 @@ fn tokenize_text(
                 descent,
                 height: line_h,
                 is_space: !preserve_spaces,
-                breakable: !matches!(white_space, WhiteSpace::Nowrap | WhiteSpace::Pre),
+                breakable: !matches!(
+                    white_space,
+                    WhiteSpace::Nowrap | WhiteSpace::Pre | WhiteSpace::BreakSpaces
+                ),
+                break_after: white_space == WhiteSpace::BreakSpaces,
                 emergency_break: EmergencyBreak::None,
             });
             *previous_collapsible_space = collapsible_space;
@@ -3224,6 +3407,9 @@ fn break_one_line(
                 // overflow the line instead of splitting generated box-model
                 // fragments away from their glyph/content.
                 cur_w = new_w;
+                if item.break_after {
+                    last_bp = Some(i + 1);
+                }
                 i += 1;
                 continue;
             }
@@ -3231,7 +3417,9 @@ fn break_one_line(
 
         cur_w += item.advance;
         has_visible_content |= inline_item_has_visible_flow_content(item);
-        if item.breakable && matches!(item.kind, InlineItemKind::Atomic { .. }) {
+        if item.break_after
+            || (item.breakable && matches!(item.kind, InlineItemKind::Atomic { .. }))
+        {
             last_bp = Some(i + 1);
         }
         i += 1;
@@ -3587,6 +3775,7 @@ pub(crate) fn clear_font_family_caches() {
     FAMILY_CACHE.with(|c| c.borrow_mut().clear());
     FRONT.with(|f| f.borrow_mut().clear());
     FONT_RATIOS.with(|c| c.borrow_mut().clear());
+    CONTROL_WIDTH_RATIOS.with(|c| c.borrow_mut().clear());
     AVAILABLE.with(|a| {
         let mut a = a.borrow_mut();
         a.0 = 0;
@@ -4020,6 +4209,85 @@ pub fn measure_text_width_fs_attrs(
     width
 }
 
+/// Primary-face advance metrics for HTML's character-width conversion.
+/// Cache unscaled ratios so size changes do not require another face lookup.
+pub(crate) fn control_character_widths(
+    fs: &mut cosmic_text::FontSystem,
+    family: &str,
+    font_px: f32,
+    weight: FontWeight,
+    style: FontStyle,
+    stretch: f32,
+) -> Option<(f32, f32)> {
+    let key = (
+        family.to_string(),
+        weight.value(),
+        style as u8,
+        stretch.to_bits(),
+        fs.db().len(),
+    );
+    let cached = CONTROL_WIDTH_RATIOS.with(|cache| cache.borrow().get(&key).copied());
+    let ratios = if let Some(cached) = cached {
+        cached
+    } else {
+        let resolved = resolve_css_family(fs, family);
+        let measured = (|| {
+            let font_style = match style {
+                FontStyle::Italic => fontdb::Style::Italic,
+                FontStyle::Oblique => fontdb::Style::Oblique,
+                FontStyle::Normal => fontdb::Style::Normal,
+            };
+            let font_stretch = stretch_from_percent(stretch);
+            let id = fs.db().query(&fontdb::Query {
+                families: &[resolved.as_family()],
+                weight: fontdb::Weight(weight.value()),
+                style: font_style,
+                stretch: font_stretch,
+            });
+            let id = match id {
+                Some(id) => id,
+                None => {
+                    // Generic mappings can be absent in a host-provided font
+                    // database. Use the shaper's platform fallback in that case.
+                    let attrs = Attrs::new()
+                        .family(resolved.as_family())
+                        .weight(Weight(weight.value()))
+                        .style(font_style)
+                        .stretch(font_stretch);
+                    let mut buffer = Buffer::new(fs, Metrics::new(font_px, font_px));
+                    buffer.set_text(fs, "0", &attrs, Shaping::Advanced, None);
+                    buffer.shape_until_scroll(fs, false);
+                    buffer.layout_runs().next()?.glyphs.first()?.font_id
+                }
+            };
+            let font = fs.get_font(id, Weight(weight.value()))?;
+            let metrics = font.metrics();
+            let units = f32::from(metrics.units_per_em);
+            let average = metrics.average_width?;
+            let maximum = metrics.max_width?;
+            (units > 0.0 && average > 0.0 && maximum > 0.0)
+                .then_some((average / units, maximum / units))
+        })();
+        CONTROL_WIDTH_RATIOS.with(|cache| {
+            let mut cache = cache.borrow_mut();
+            if cache.len() >= MAX_CONTROL_FONT_METRICS {
+                cache.clear();
+            }
+            cache.insert(key, measured);
+        });
+        measured
+    }?;
+    let size = font_px * font_size_adjust_scale(fs, family);
+    Some((ratios.0 * size, ratios.1 * size))
+}
+
+const MAX_CONTROL_FONT_METRICS: usize = 512;
+type ControlFontKey = (String, u16, u8, u32, usize);
+thread_local! {
+    static CONTROL_WIDTH_RATIOS: std::cell::RefCell<std::collections::HashMap<ControlFontKey, Option<(f32, f32)>>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 pub fn measure_text_width_ts(text: &str, font_px: f32, tab_size: i32) -> f32 {
     let char_w = font_px * 0.55;
     let space_w = char_w * 0.35;
@@ -4096,15 +4364,43 @@ impl FontMetricOverride {
         let mut desc = desc * size_adjust;
         let mut leading = leading * size_adjust;
         if let Some(v) = self.ascent {
-            asc = v.max(0.0);
+            asc = v.max(0.0) * size_adjust;
         }
         if let Some(v) = self.descent {
-            desc = v.max(0.0);
+            desc = v.max(0.0) * size_adjust;
         }
         if let Some(v) = self.line_gap {
-            leading = v.max(0.0);
+            leading = v.max(0.0) * size_adjust;
         }
         (asc, desc, leading)
+    }
+}
+
+#[cfg(test)]
+mod font_metric_override_tests {
+    use super::FontMetricOverride;
+
+    #[test]
+    fn font_metric_overrides_use_the_size_adjusted_em() {
+        let metrics = FontMetricOverride {
+            size_adjust: Some(1.1),
+            ascent: Some(1.2),
+            descent: Some(0.2),
+            line_gap: Some(0.1),
+        };
+        let (ascent, descent, gap) = metrics.apply(0.8, 0.2, 0.0);
+        assert!((ascent - 1.32).abs() < 0.00001);
+        assert!((descent - 0.22).abs() < 0.00001);
+        assert!((gap - 0.11).abs() < 0.00001);
+
+        let normal = FontMetricOverride {
+            size_adjust: Some(1.1),
+            ..Default::default()
+        };
+        let (ascent, descent, gap) = normal.apply(0.8, 0.2, 0.1);
+        assert!((ascent - 0.88).abs() < 0.00001);
+        assert!((descent - 0.22).abs() < 0.00001);
+        assert!((gap - 0.11).abs() < 0.00001);
     }
 }
 
@@ -4171,17 +4467,25 @@ fn font_family_available(fs: &cosmic_text::FontSystem, lower_family: &str) -> bo
 }
 
 fn measure_font_ratios(fs: &mut cosmic_text::FontSystem, family: &str) -> Option<(f32, f32, f32)> {
-    let resolved;
-    let mut attrs = Attrs::new();
-    if !family.is_empty() {
-        resolved = resolve_css_family(fs, family);
-        attrs = attrs.family(resolved.as_family());
-    }
-    // Shape one glyph purely to learn which face the family resolves to.
-    let mut buffer = Buffer::new(fs, Metrics::new(16.0, 16.0));
-    buffer.set_text(fs, "x", &attrs, Shaping::Advanced, None);
-    buffer.shape_until_scroll(fs, false);
-    let font_id = buffer.layout_runs().next()?.glyphs.first()?.font_id;
+    let resolved = resolve_css_family(fs, family);
+    let font_id = fs.db().query(&fontdb::Query {
+        families: &[resolved.as_family()],
+        weight: fontdb::Weight::NORMAL,
+        style: fontdb::Style::Normal,
+        stretch: fontdb::Stretch::Normal,
+    });
+    let font_id = match font_id {
+        Some(id) => id,
+        None => {
+            // Host databases may lack a generic mapping. Only then use the
+            // shaper's fallback; an icon face need not contain an 'x' glyph.
+            let attrs = Attrs::new().family(resolved.as_family());
+            let mut buffer = Buffer::new(fs, Metrics::new(16.0, 16.0));
+            buffer.set_text(fs, "x", &attrs, Shaping::Advanced, None);
+            buffer.shape_until_scroll(fs, false);
+            buffer.layout_runs().next()?.glyphs.first()?.font_id
+        }
+    };
     // The regular face's metrics stand in for every weight and style of the
     // family. Vertical metrics rarely differ across a family's faces, and
     // keying the cache on weight and style would multiply the probes on the
@@ -4202,6 +4506,55 @@ fn measure_font_ratios(fs: &mut cosmic_text::FontSystem, family: &str) -> Option
     // natural line height and subtracted back out later — that subtraction
     // left floating-point dust on an exact value.
     Some((asc, desc, m.leading.max(0.0) / upem))
+}
+
+#[cfg(test)]
+mod icon_font_metric_tests {
+    use super::*;
+
+    #[test]
+    fn icon_font_metrics_do_not_depend_on_a_missing_latin_probe() {
+        let bytes = include_bytes!("../tests/fixtures/fonts/bootstrap-icons-1.11.3.woff2");
+        let sfnt = crate::woff::decode(bytes).unwrap();
+        let mut fs = cosmic_text::FontSystem::new();
+        let ids = fs
+            .db_mut()
+            .load_font_source(fontdb::Source::Binary(std::sync::Arc::new(sfnt)));
+        assert!(!ids.is_empty());
+        let resolved = resolve_css_family(&fs, "bootstrap-icons");
+        let id = fs
+            .db()
+            .query(&fontdb::Query {
+                families: &[resolved.as_family()],
+                weight: fontdb::Weight::NORMAL,
+                style: fontdb::Style::Normal,
+                stretch: fontdb::Stretch::Normal,
+            })
+            .unwrap();
+        assert!(ids.contains(&id));
+        let mut probe = Buffer::new(&mut fs, Metrics::new(20.0, 20.0));
+        let attrs = Attrs::new().family(Family::Name("bootstrap-icons"));
+        probe.set_text(&mut fs, "x", &attrs, Shaping::Advanced, None);
+        probe.shape_until_scroll(&mut fs, false);
+        assert_ne!(
+            probe.layout_runs().next().unwrap().glyphs[0].font_id,
+            id,
+            "fixture must demonstrate the missing-Latin-glyph fallback"
+        );
+        let face = fs.get_font(id, Weight::NORMAL).unwrap();
+        let metrics = face.metrics();
+        let expected = (
+            (metrics.ascent / metrics.units_per_em as f32 * 20.0).round(),
+            (-metrics.descent / metrics.units_per_em as f32 * 20.0).round(),
+        );
+        for family in ["bootstrap-icons", "RuneMissingMetricFace, bootstrap-icons"] {
+            FONT_RATIOS.with(|cache| {
+                cache.borrow_mut().remove(&family.to_ascii_lowercase());
+            });
+            let (ascent, descent, _) = font_metrics(Some(&mut fs), family, 20.0);
+            assert_eq!((ascent, descent), expected, "family stack {family}");
+        }
+    }
 }
 
 /// Everything `fill_char_x_for_line` shapes from, as one number.
@@ -4410,7 +4763,9 @@ pub fn fill_char_x_for_line(
         buf.shape_until_scroll(fs, false);
 
         let mut seg_advance = 0.0f32;
+        let mut segment_rtl = false;
         for lr in buf.layout_runs() {
+            segment_rtl = lr.rtl;
             for glyph in lr.glyphs {
                 let abs_s = s + glyph.start;
                 let abs_e = s + glyph.end;
@@ -4422,7 +4777,12 @@ pub fn fill_char_x_for_line(
                 for k in 0..=span {
                     let idx = i_s + k;
                     if idx < positions.len() && positions[idx].is_nan() {
-                        positions[idx] = x0 + (x1 - x0) * k as f32 / span as f32;
+                        let fraction = k as f32 / span as f32;
+                        positions[idx] = if glyph.level.is_rtl() {
+                            x1 + (x0 - x1) * fraction
+                        } else {
+                            x0 + (x1 - x0) * fraction
+                        };
                     }
                 }
                 let right = x1 - cursor_x;
@@ -4441,24 +4801,35 @@ pub fn fill_char_x_for_line(
         let word_s = run.style.word_spacing.resolve(font_px, 0.0, 16.0);
         let letter_s = run.style.letter_spacing.resolve(font_px, 0.0, 16.0);
         let extra = line.extra_space_per_word;
+        let n_spc = seg_text.chars().filter(|&c| c == ' ').count() as f32;
+        let n_chars = seg_text.chars().count() as f32;
+        let total_adjustment = n_spc * (word_s + extra) + n_chars * letter_s;
         let mut adjustment = 0.0;
         for (rel, ch) in seg_text.char_indices() {
             let idx = s + rel - line_start;
             if idx < positions.len() && positions[idx].is_finite() {
-                positions[idx] += adjustment;
+                positions[idx] += if segment_rtl {
+                    total_adjustment - adjustment
+                } else {
+                    adjustment
+                };
             }
             adjustment += letter_s;
             if ch == ' ' {
                 adjustment += word_s + extra;
             }
         }
-        let n_spc = seg_text.chars().filter(|&c| c == ' ').count() as f32;
-        let n_chars = seg_text.chars().count() as f32;
-        let final_advance = seg_advance + n_spc * (word_s + extra) + n_chars * letter_s;
+        let final_advance = seg_advance + total_adjustment;
         let end_idx = e - line_start;
         if end_idx < positions.len() {
-            let end_x = cursor_x + final_advance;
-            if positions[end_idx].is_finite() {
+            let end_x = if segment_rtl {
+                cursor_x
+            } else {
+                cursor_x + final_advance
+            };
+            if segment_rtl {
+                positions[end_idx] = end_x;
+            } else if positions[end_idx].is_finite() {
                 positions[end_idx] += adjustment;
                 if positions[end_idx] < end_x {
                     positions[end_idx] = end_x;
@@ -4470,7 +4841,11 @@ pub fn fill_char_x_for_line(
         if s >= line_start {
             let start_idx = s - line_start;
             if start_idx < positions.len() && positions[start_idx].is_nan() {
-                positions[start_idx] = cursor_x;
+                positions[start_idx] = if segment_rtl {
+                    cursor_x + final_advance
+                } else {
+                    cursor_x
+                };
             }
         }
         final_advance
@@ -4576,9 +4951,39 @@ pub fn fill_char_x_for_line(
 // ─── Collect flat text (same traversal as collect_items) ─────────────────────
 /// Used by the renderer to map text_start offsets back to characters.
 pub fn collect_flat_text(node: &WebCore) -> String {
+    let _profile = crate::profile::span(crate::profile::Phase::InlineTextCollect);
     let mut out = String::new();
     collect_flat_text_inner(node, &mut out, true);
     out
+}
+
+/// The byte interval contributed by a child to its owner's rendered text.
+/// Uses the same transformation and out-of-flow exclusions as line offsets.
+pub(crate) fn flat_text_child_range(parent: &WebCore, target: &WebCore) -> Option<(usize, usize)> {
+    if parent.style.display == Display::None || !generated_content_for_layout(parent).is_empty() {
+        return None;
+    }
+    let mut text = String::new();
+    if !parent.style.before_content.is_empty() {
+        let style = parent
+            .style
+            .before_style
+            .as_deref()
+            .unwrap_or(&parent.style);
+        push_flat_rendered_text(&mut text, &parent.style.before_content, style);
+    }
+    text.push_str(&parent.text);
+    for child in parent.effective_children() {
+        if matches!(child.style.position, Position::Absolute | Position::Fixed) {
+            continue;
+        }
+        let start = text.len();
+        collect_flat_text_inner(child, &mut text, false);
+        if std::ptr::eq(child, target) {
+            return Some((start, text.len()));
+        }
+    }
+    None
 }
 
 fn collect_flat_text_inner(node: &WebCore, out: &mut String, is_root: bool) {

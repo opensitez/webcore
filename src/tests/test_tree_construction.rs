@@ -136,6 +136,62 @@ fn inline_svg_script_uses_script_hook() {
     );
 }
 
+#[test]
+fn inline_svg_projects_mixed_text_in_order_with_stable_element_paths() {
+    for (markup, leading, inner, trailing) in [
+        ("<text>A<tspan>B</tspan>C</text>", "A", "B", "C"),
+        ("<text>\u{e9}<![CDATA[<&]]><tspan>\u{3b2}</tspan><![CDATA[>]]>\u{4e2d}</text>",
+            "\u{e9}<&", "\u{3b2}", ">\u{4e2d}"),
+        ("<text> <tspan>B</tspan> </text>", " ", "B", " "),
+    ] {
+        let doc = parse_html(&format!("<svg>{markup}</svg>"));
+        let text = find_tag(&doc.root, "text").unwrap();
+        assert_eq!(text.svg_tree_path.as_deref(), Some(&[0][..]));
+        assert_eq!(text.children.len(), 3, "{markup}");
+        assert_eq!(text.children[0].tag, "#text");
+        assert_eq!(text.children[0].text, leading);
+        assert_eq!(text.children[1].tag, "tspan");
+        assert_eq!(text.children[1].svg_tree_path.as_deref(), Some(&[0, 0][..]));
+        assert_eq!(text.children[1].children[0].text, inner);
+        assert_eq!(text.children[2].tag, "#text");
+        assert_eq!(text.children[2].text, trailing);
+        assert!(text.children[0].svg_tree_path.is_none());
+        assert!(text.children[2].svg_tree_path.is_none());
+    }
+}
+
+#[test]
+fn inline_svg_mixed_text_projection_roundtrips_through_dom_source() {
+    let original = "<svg> <text>A<![CDATA[<&]]><tspan>\u{3b2}</tspan>C\u{4e2d}</text> <g/> </svg>";
+    let doc = parse_html(original);
+    let svg = find_tag(&doc.root, "svg").unwrap();
+    assert_eq!(svg.children.len(), 5);
+    assert_eq!(svg.children[0].text, " ");
+    assert_eq!(svg.children[2].text, " ");
+    assert_eq!(svg.children[4].text, " ");
+    assert_eq!(svg.children[3].svg_tree_path.as_deref(), Some(&[1][..]));
+    let source = crate::svg::build_inline_svg_source_from_node(svg);
+    let reparsed = crate::svg::parse_svg_document(&source.markup).unwrap();
+    let native = svg.svg_document.as_ref().unwrap();
+    assert_eq!(reparsed.root.children, native.root.children);
+    assert_eq!(reparsed.root.text, native.root.text);
+    assert_eq!(reparsed.root.text_runs, native.root.text_runs);
+
+    let roundtrip = parse_html(&source.markup);
+    let projected = find_tag(&roundtrip.root, "svg").unwrap();
+    fn ordered_nodes(node: &WebCore, out: &mut Vec<(String, String, Option<Vec<usize>>)>) {
+        out.push((node.tag.clone(), node.text.clone(), node.svg_tree_path.clone()));
+        for child in &node.children {
+            ordered_nodes(child, out);
+        }
+    }
+    let mut expected = Vec::new();
+    let mut actual = Vec::new();
+    ordered_nodes(svg, &mut expected);
+    ordered_nodes(projected, &mut actual);
+    assert_eq!(actual, expected);
+}
+
 /// (markup, expected canonical tree) — cases webcore matches a browser on.
 const CASES: &[(&str, &str)] = &[
     (

@@ -51,6 +51,18 @@ pub struct DateField {
 }
 
 impl DateField {
+    pub const TEXT_INSET_PX: f32 = 4.0;
+
+    /// Shared label bounds for value paint, selection, caret and pointer input.
+    pub(crate) fn text_rect(rect: crate::types::Rect) -> crate::types::Rect {
+        crate::types::Rect::new(
+            rect.x + Self::TEXT_INSET_PX,
+            rect.y,
+            (rect.w - Self::glyph_width(rect.h) - Self::TEXT_INSET_PX).max(0.0),
+            rect.h,
+        )
+    }
+
     pub fn new(kind: Kind, width: f32, height: f32) -> Self {
         Self {
             kind,
@@ -153,7 +165,7 @@ impl Calendar {
     }
 
     pub fn height() -> f32 {
-        Self::HEADER + Self::WEEKS as f32 * Self::CELL
+        Self::HEADER + Self::WEEKS as f32 * Self::CELL + Self::CELL
     }
 
     /// Which day-of-month a point lands on, given the month's shape.
@@ -164,7 +176,7 @@ impl Calendar {
     /// pickable — clicking the gap before the 1st selecting the 1st is the
     /// classic calendar bug.
     pub fn day_at(local: (f32, f32), first_weekday: usize, days: u32) -> Option<u32> {
-        if local.1 < Self::HEADER {
+        if local.0 < 0.0 || local.1 < Self::HEADER {
             return None;
         }
         let col = (local.0 / Self::CELL) as usize;
@@ -175,6 +187,43 @@ impl Calendar {
         let index = row * Self::COLUMNS + col;
         let day = index.checked_sub(first_weekday)? + 1;
         (day as u32 <= days).then_some(day as u32)
+    }
+
+    /// Header arrows occupy the same cell-width targets in paint and hit testing.
+    pub fn navigation_at(local: (f32, f32)) -> Option<i32> {
+        if local.1 < 0.0 || local.1 >= Self::CELL || local.0 < 0.0 || local.0 >= Self::width() {
+            return None;
+        }
+        if local.0 < Self::CELL {
+            Some(-1)
+        } else if local.0 >= Self::width() - Self::CELL {
+            Some(1)
+        } else {
+            None
+        }
+    }
+}
+
+/// Twelve month targets, with stable geometry shared by rendering and input.
+pub struct MonthGrid;
+impl MonthGrid {
+    pub const COLUMNS: usize = 3;
+    pub const ROWS: usize = 4;
+    pub const ROW_HEIGHT: f32 = Calendar::CELL * 1.5;
+    pub fn height() -> f32 {
+        Calendar::HEADER + Self::ROWS as f32 * Self::ROW_HEIGHT + Calendar::CELL
+    }
+    pub fn month_at(local: (f32, f32)) -> Option<u32> {
+        if local.0 < 0.0
+            || local.0 >= Calendar::width()
+            || local.1 < Calendar::HEADER
+            || local.1 >= Self::height() - Calendar::CELL
+        {
+            return None;
+        }
+        let column = (local.0 / (Calendar::width() / Self::COLUMNS as f32)) as usize;
+        let row = ((local.1 - Calendar::HEADER) / Self::ROW_HEIGHT) as usize;
+        Some((row * Self::COLUMNS + column + 1) as u32)
     }
 }
 
@@ -197,25 +246,20 @@ pub fn days_in_month(year: i32, month: u32) -> u32 {
 /// a month on screen.
 pub fn first_weekday(year: i32, month: u32) -> usize {
     const T: [i32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
-    let mut y = year;
+    let mut y = i64::from(year);
     if month < 3 {
         y -= 1;
     }
     let m = (month as usize).clamp(1, 12) - 1;
-    let sunday_based = (y + y / 4 - y / 100 + y / 400 + T[m] + 1).rem_euclid(7);
+    let sunday_based = (y + y / 4 - y / 100 + y / 400 + i64::from(T[m]) + 1).rem_euclid(7);
     // Sakamoto counts from Sunday; the grid starts on Monday.
     ((sunday_based + 6) % 7) as usize
 }
 
 /// `yyyy-mm-dd` — the value format HTML requires of a date input.
 pub fn parse_date(value: &str) -> Option<(i32, u32, u32)> {
-    let mut parts = value.trim().split('-');
-    let y = parts.next()?.parse::<i32>().ok()?;
-    let m = parts.next()?.parse::<u32>().ok()?;
-    let d = parts.next()?.parse::<u32>().ok()?;
-    (1..=12).contains(&m).then_some(())?;
-    (1..=31).contains(&d).then_some(())?;
-    Some((y, m, d))
+    let (year, month, day) = crate::html::temporal::date_parts(value)?;
+    Some((year.parse().ok()?, month, day))
 }
 
 pub fn to_date_value(year: i32, month: u32, day: u32) -> String {

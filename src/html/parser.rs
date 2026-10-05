@@ -235,15 +235,19 @@ impl HtmlParser {
             return;
         };
         node.svg_tree_path = Some(Vec::new());
-        if !doc.root.text.trim().is_empty() {
-            let mut text = self.new_box("#text");
-            text.text = doc.root.text.clone();
-            apply_property(std::sync::Arc::make_mut(&mut text.style), "display", "none");
-            node.children.push(text);
-        }
-        for (index, child) in doc.root.children.iter().enumerate() {
-            node.children
-                .push(self.project_svg_node(child, vec![index]));
+        for content in doc.root.content() {
+            match content {
+                crate::svg::tree::SvgContent::Text(value) => {
+                    let mut text = self.new_box("#text");
+                    text.text = value.to_string();
+                    apply_property(std::sync::Arc::make_mut(&mut text.style), "display", "none");
+                    node.children.push(text);
+                }
+                crate::svg::tree::SvgContent::Element(index, child) => {
+                    node.children
+                        .push(self.project_svg_node(child, vec![index]));
+                }
+            }
         }
     }
 
@@ -257,16 +261,20 @@ impl HtmlParser {
             };
             node.attributes.insert(name, attr.value.clone());
         }
-        if !svg.text.trim().is_empty() {
-            let mut text = self.new_box("#text");
-            text.text = svg.text.clone();
-            apply_property(std::sync::Arc::make_mut(&mut text.style), "display", "none");
-            node.children.push(text);
-        }
-        for (index, child) in svg.children.iter().enumerate() {
-            let mut child_path = path.clone();
-            child_path.push(index);
-            node.children.push(self.project_svg_node(child, child_path));
+        for content in svg.content() {
+            match content {
+                crate::svg::tree::SvgContent::Text(value) => {
+                    let mut text = self.new_box("#text");
+                    text.text = value.to_string();
+                    apply_property(std::sync::Arc::make_mut(&mut text.style), "display", "none");
+                    node.children.push(text);
+                }
+                crate::svg::tree::SvgContent::Element(index, child) => {
+                    let mut child_path = path.clone();
+                    child_path.push(index);
+                    node.children.push(self.project_svg_node(child, child_path));
+                }
+            }
         }
         apply_presentational_attrs(&mut node);
         apply_property(std::sync::Arc::make_mut(&mut node.style), "display", "none");
@@ -750,7 +758,7 @@ impl HtmlParser {
                     apply_presentational_attrs(&mut node);
 
                     // <img> handling
-                    if tag == "img" {
+                    if node.is_image_element() {
                         if let Some(src) = node.attributes.get("src").cloned() {
                             node.resolved_src = resolve_url(&src, &self.base_url);
                         }
@@ -1067,7 +1075,7 @@ impl HtmlParser {
         );
         apply_presentational_attrs(&mut node);
 
-        if tag == "img" {
+        if node.is_image_element() {
             if let Some(src) = crate::html::image_fallback_source(&node).map(str::to_string) {
                 node.resolved_src = resolve_url(&src, &self.base_url);
             }

@@ -1,4 +1,4 @@
-use crate::css::{Combinator, CssRule, CssSelector, SelectorPart, ua_stylesheet};
+use crate::css::{Combinator, CssRule, CssSelector, SelectorPart};
 use crate::types::{
     AlignItems, BorderStyle, Color, ComputedStyle, CssLength, Display, Document, FlexDirection,
     FlexWrap, Float, FontStyle, FontWeight, JustifyContent, Position, TextAlign, TextTransform,
@@ -367,6 +367,7 @@ pub fn serialize_style_to_css(style: &ComputedStyle, _tag: &str) -> String {
         WhiteSpace::Nowrap => "nowrap",
         WhiteSpace::Pre => "pre",
         WhiteSpace::PreWrap => "pre-wrap",
+        WhiteSpace::BreakSpaces => "break-spaces",
         WhiteSpace::PreLine => "pre-line",
     };
     if !ws_str.is_empty() {
@@ -655,7 +656,7 @@ pub fn serialize_rule(rule: &CssRule) -> String {
 /// `document.styleSheets`, rebuilt from the cascade rather than from source.
 pub fn serialize_stylesheet(doc: &Document) -> String {
     // Skip UA rules — only emit author rules (appended after UA rules in combined stylesheet).
-    let ua_count = ua_stylesheet().rules.len();
+    let ua_count = crate::css::ua_sheet::ua_rule_count(doc.quirks);
     let author_rules: Vec<_> = doc.stylesheet.rules.iter().skip(ua_count).collect();
 
     if author_rules.is_empty() {

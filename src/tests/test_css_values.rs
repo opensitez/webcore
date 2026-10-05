@@ -3,6 +3,219 @@
 use crate::css::{parse_color, parse_length};
 
 #[test]
+fn bad_declaration_tokens_preserve_fallbacks_and_later_declarations() {
+    for bad in [
+        "'broken\n",
+        "fn('broken\n)",
+        "url(a b)",
+        "url(a\"b)",
+        "red)",
+        "[red)]",
+        "fn([red)])",
+        "red !no !important",
+        "red !important !important",
+    ] {
+        let source = format!("--x:good;--x:{bad};color:green;width:10px");
+        let plain = crate::css::parse_declarations(&source);
+        assert_eq!(plain.get("--x").map(String::as_str), Some("good"), "{bad}");
+        assert_eq!(
+            plain.get("color").map(String::as_str),
+            Some("green"),
+            "{bad}"
+        );
+        assert_eq!(
+            plain.get("width").map(String::as_str),
+            Some("10px"),
+            "{bad}"
+        );
+        let (normal, important) = crate::css::parse_declarations_important(&source);
+        assert_eq!(normal.get("--x").map(String::as_str), Some("good"), "{bad}");
+        assert_eq!(
+            normal.get("color").map(String::as_str),
+            Some("green"),
+            "{bad}"
+        );
+        assert!(important.is_empty(), "{bad}");
+    }
+    for valid in [
+        "fn(!x)",
+        "{a:1;b:2}",
+        "[red blue]",
+        "'a\\\nb'",
+        "url(a\\ b)",
+    ] {
+        let source = format!("--x:{valid};color:green");
+        let values = crate::css::parse_declarations(&source);
+        assert_eq!(
+            values.get("--x").map(String::as_str),
+            Some(valid),
+            "{valid}"
+        );
+    }
+}
+
+#[test]
+fn css_input_filtering_reaches_stylesheets_and_inline_declarations() {
+    let source = "--nul:a\0b;--line:'a\\\r\nb';--ff:'c\\\x0cd';color:red";
+    let expected =
+        crate::css::parse_declarations("--nul:a\u{fffd}b;--line:'a\\\nb';--ff:'c\\\nd';color:red");
+    assert_eq!(crate::css::parse_declarations(source), expected);
+    let (normal, important) = crate::css::parse_declarations_important(source);
+    assert!(important.is_empty());
+    for (name, value) in &expected {
+        assert_eq!(normal.get(name), Some(value));
+    }
+    let rules = crate::css::parse_stylesheet(&format!(".a\0b\r\n{{{source}}}")).unwrap();
+    assert_eq!(rules.len(), 1);
+    for (name, value) in &expected {
+        assert_eq!(rules[0].declarations.get(name), Some(value));
+    }
+    assert_eq!(
+        crate::css::parse_selector(".a\0b"),
+        crate::css::parse_selector(".a\u{fffd}b")
+    );
+}
+
+#[test]
+fn css_urls_use_lexical_names_and_preserve_opaque_source() {
+    for (source, expected) in [
+        (r"url(icon\))", "icon)"),
+        (r"url(icon\)", "icon)"),
+        (r"url(icon\ )", "icon "),
+    ] {
+        assert_eq!(
+            crate::css::extract_url(source).as_deref(),
+            Some(expected),
+            "{source}"
+        );
+    }
+    for source in [
+        r"u\72 l(icon.svg)",
+        r#"u\72 l("icon.svg")"#,
+        r#"url("icon.svg" /* ) */ )"#,
+    ] {
+        assert_eq!(
+            crate::css::extract_url(source).as_deref(),
+            Some("icon.svg"),
+            "{source}"
+        );
+        for property in ["background", "background-image", "mask", "mask-image"] {
+            let mut style = crate::types::ComputedStyle::default();
+            crate::css::apply_property(&mut style, property, source);
+            let url = if property.starts_with("mask") {
+                &style.rare().mask_image_url
+            } else {
+                &style.background_image_url
+            };
+            assert_eq!(url, "icon.svg", "{property}: {source}");
+        }
+    }
+    for source in [
+        r#""url(fake.svg)""#,
+        "/* url(fake.svg) */ none",
+        "noturl(fake.svg)",
+    ] {
+        assert_eq!(crate::css::extract_url(source), None, "{source}");
+    }
+    let source = r#"/* url(comment.svg) */ .a { content: "url(string.svg)"; background: u\72 l(real.svg); } .b { background: url(bad url); mask: url(next.svg); }"#;
+    let resolved = crate::css::resolve_css_urls(source, "https://example.test/css/main.css");
+    assert!(resolved.contains("/* url(comment.svg) */"), "{resolved}");
+    assert!(
+        resolved.contains(r#"content: "url(string.svg)""#),
+        "{resolved}"
+    );
+    assert!(
+        resolved.contains("url('https://example.test/css/real.svg')"),
+        "{resolved}"
+    );
+    assert!(resolved.contains("url(bad url)"), "{resolved}");
+    assert!(
+        resolved.contains("url('https://example.test/css/next.svg')"),
+        "{resolved}"
+    );
+    assert_eq!(resolved.matches(".b {").count(), 1, "{resolved}");
+}
+
+#[test]
+fn image_set_function_and_descriptor_names_follow_css_tokens() {
+    use crate::css::property_defs::extract_image_set_url_for_device_pixel_ratio as select;
+    for source in [
+        r#"ima\67 e-set("low.png" 1x, "high.png" 2x)"#,
+        r#"image-set("low.png" 1x, "high.png" 2\78)"#,
+        r#"image-set("low.png" 1x, "high.png" 192d\70 i)"#,
+        r#"image-set("low.png" 1x, "high.png" 2x t\79 pe("image/png"))"#,
+        r#"image-set("low.png" 1x, "high.png" calc(2dppx /* ) , */ + 0dppx))"#,
+    ] {
+        assert_eq!(select(source, 2.0).as_deref(), Some("high.png"), "{source}");
+        for property in ["background-image", "background", "mask-image", "mask"] {
+            let mut style = crate::types::ComputedStyle::default();
+            crate::css::apply_property(&mut style, property, source);
+            let url = if property.starts_with("mask") {
+                &style.rare().mask_image_url
+            } else {
+                &style.background_image_url
+            };
+            assert_eq!(url, "low.png", "{property}: {source}");
+        }
+    }
+    for source in [
+        r#"-webkit-image-set("low.png" 1x, "high.png" 2x)"#,
+        r#"-webkit-ima\67 e-set("low.png" 1x, "high.png" 2x)"#,
+    ] {
+        let mut style = crate::types::ComputedStyle::default();
+        crate::css::apply_property(&mut style, "background", source);
+        assert_eq!(style.background_image_url, "low.png", "{source}");
+    }
+    for source in [
+        r#"image-set("low.png" 1x) extra"#,
+        r#"image-set("low.png" 1\25)"#,
+        r#"image-set("low.png" 1x type("image/png") extra)"#,
+    ] {
+        assert_eq!(select(source, 1.0), None, "{source}");
+    }
+}
+
+#[test]
+fn gradient_function_extraction_uses_css_tokens() {
+    use crate::types::GradientType;
+    for (source, kind) in [
+        (r"l\69 near-gradient(red, blue)", GradientType::Linear),
+        (r"r\61 dial-gradient(red, blue)", GradientType::Radial),
+        (
+            r"repeating-l\69 near-gradient(to right, red 10px, blue 30px)",
+            GradientType::RepeatingLinear,
+        ),
+        (
+            "repeating-radial-gradient(circle 20px, red -10px, blue 10px)",
+            GradientType::RepeatingRadial,
+        ),
+        (
+            "linear-gradient(red calc(0% /* ) , */ + 0%), blue)",
+            GradientType::Linear,
+        ),
+    ] {
+        for property in ["background", "background-image"] {
+            let mut style = crate::types::ComputedStyle::default();
+            crate::css::apply_property(&mut style, property, source);
+            assert_eq!(style.gradient_type, kind, "{property}: {source}");
+            assert_eq!(style.rare().gradient_stops.len(), 2, "{source}");
+        }
+    }
+    let mut style = crate::types::ComputedStyle::default();
+    crate::css::apply_gradient(&mut style, r#"url("linear-gradient(red, blue)")"#);
+    assert_eq!(style.gradient_type, GradientType::None);
+    crate::css::apply_gradient(&mut style, "/* linear-gradient(red,blue) */ none");
+    assert_eq!(style.gradient_type, GradientType::None);
+    crate::css::apply_gradient(&mut style, "linear-gradient(red, blue");
+    assert_eq!(style.gradient_type, GradientType::None);
+    crate::css::apply_gradient(
+        &mut style,
+        r#"url("linear-gradient(red, blue)"), radial-gradient(red, blue)"#,
+    );
+    assert_eq!(style.gradient_type, GradientType::Radial);
+}
+
+#[test]
 fn comma_components_use_shared_opaque_tokens_and_all_block_kinds() {
     let split = crate::css::value_parse::split_top_level_commas;
     for (source, expected) in [
@@ -525,7 +738,8 @@ fn line_height_number_is_a_multiple_not_pixels() {
         ("1.375", crate::types::CssLength::Em(1.375)),
         ("2", crate::types::CssLength::Em(2.0)),
         ("calc(1.6 * .65)", crate::types::CssLength::Em(1.04)),
-        ("normal", crate::types::CssLength::Em(1.2)),
+        ("normal", crate::types::CssLength::Auto),
+        ("n\\6f rmal", crate::types::CssLength::Auto),
     ] {
         // The string path.
         let mut s = crate::types::ComputedStyle::default();

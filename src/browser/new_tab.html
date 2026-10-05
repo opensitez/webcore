@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>New Tab</title>
+<style>
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; display: flex; align-items: center;
+       justify-content: center; font-family: system-ui, sans-serif;
+       background: light-dark(#f5f6f8, #18191c); color: light-dark(#202124, #e8eaed); }
+main { width: 560px; max-width: 90%; text-align: center; }
+h1 { font-size: 40px; font-weight: 600; margin: 0 0 28px; }
+form { display: flex; gap: 8px; }
+input { flex: 1; min-width: 0; font: inherit; padding: 14px 18px;
+        color: inherit; background: light-dark(#fff, #292b30);
+        border: 1px solid light-dark(#dadce0, #55585f); border-radius: 6px; }
+button { font: inherit; padding: 14px 20px; border: 0; border-radius: 6px;
+         background: #285fcc; color: #fff; cursor: pointer; }
+</style>
+</head>
+<body><main><h1>Webcore</h1>
+<form action="https://duckduckgo.com/" method="get">
+<input type="search" name="q" placeholder="Search the web" aria-label="Search the web">
+<button type="submit">Search</button>
+</form></main></body>
+</html>

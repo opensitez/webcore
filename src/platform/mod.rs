@@ -22,6 +22,7 @@ pub struct VideoLayerFrame {
     pub rgba: Arc<Vec<u8>>,
     pub source_width: u32,
     pub source_height: u32,
+    pub presentation_size: Option<(u32, u32)>,
     /// Destination in logical window coordinates.
     pub x: f32,
     pub y: f32,
@@ -31,6 +32,36 @@ pub struct VideoLayerFrame {
     pub corner_radius: f32,
     pub tint: Option<[u8; 4]>,
     pub foreground: Option<VideoForeground>,
+}
+
+impl VideoLayerFrame {
+    /// Normalized centered source crop, shared by native layers and capture.
+    pub fn contents_rect(&self) -> (f64, f64, f64, f64) {
+        let (width, height) = self.presentation_size
+            .filter(|&(width, height)| width > 0 && height > 0)
+            .unwrap_or((self.source_width, self.source_height));
+        if !self.cover || width == 0 || height == 0 || !self.width.is_finite()
+            || !self.height.is_finite() || self.width <= 0.0 || self.height <= 0.0
+        { return (0.0, 0.0, 1.0, 1.0); }
+        let source_aspect = f64::from(width) / f64::from(height);
+        let destination_aspect = f64::from(self.width) / f64::from(self.height);
+        if source_aspect > destination_aspect {
+            let crop_width = destination_aspect / source_aspect;
+            ((1.0 - crop_width) * 0.5, 0.0, crop_width, 1.0)
+        } else {
+            let crop_height = source_aspect / destination_aspect;
+            (0.0, (1.0 - crop_height) * 0.5, 1.0, crop_height)
+        }
+    }
+    /// Use the same pixel check as software composition before selecting a layer.
+    pub fn is_opaque(&self) -> bool {
+        let expected = u64::from(self.source_width)
+            .checked_mul(u64::from(self.source_height))
+            .and_then(|pixels| pixels.checked_mul(4));
+        self.source_width != 0 && self.source_height != 0
+            && expected == Some(self.rgba.len() as u64)
+            && crate::renderer::display_list_replay::rgba_is_opaque(&self.rgba)
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -63,20 +94,11 @@ fn paint_video_layer_for_capture(pixmap: &mut Pixmap, frame: &VideoLayerFrame, s
     use crate::types::Rect;
 
     let rect = Rect::new(frame.x, frame.y, frame.width, frame.height);
-    let (x, y, width, height) = if frame.cover {
-        let factor = (frame.width / frame.source_width as f32)
-            .max(frame.height / frame.source_height as f32);
-        let width = frame.source_width as f32 * factor;
-        let height = frame.source_height as f32 * factor;
-        (
-            frame.x + (frame.width - width) * 0.5,
-            frame.y + (frame.height - height) * 0.5,
-            width,
-            height,
-        )
-    } else {
-        (frame.x, frame.y, frame.width, frame.height)
-    };
+    let (crop_x, crop_y, crop_width, crop_height) = frame.contents_rect();
+    let width = frame.width / crop_width as f32;
+    let height = frame.height / crop_height as f32;
+    let x = frame.x - crop_x as f32 * width;
+    let y = frame.y - crop_y as f32 * height;
     let mut list = DisplayList::new();
     list.push(PaintCmd::PushClip {
         rect,
@@ -142,13 +164,25 @@ fn rgba_to_argb(dst: &mut [u32], rgba: &[u8]) {
     rgba_to_argb_scalar(dst, rgba);
 }
 
+fn recycle_framebuffer(previous: &Pixmap, pool: &mut Vec<Arc<Pixmap>>, preserve: bool) -> Option<Arc<Pixmap>> {
+    let mut next = pool.iter().position(|p| Arc::strong_count(p) == 1)
+        .map(|index| pool.swap_remove(index))
+        .or_else(|| Pixmap::new(previous.width(), previous.height()).map(Arc::new))?;
+    // Partial repaints need the latest frame, not the recycled buffer's contents.
+    if preserve {
+        Arc::get_mut(&mut next)?.data_mut().copy_from_slice(previous.data());
+    }
+    Some(next)
+}
+
 pub struct Platform {
     surface: Surface<Arc<Window>, Arc<Window>>,
     window: Arc<Window>,
     width: u32,
     height: u32,
     /// Reused across frames to avoid per-frame allocation (~10 MB on 2× Retina).
-    pixmap: Option<Pixmap>,
+    pixmap: Option<Arc<Pixmap>>,
+    framebuffer_pool: Vec<Arc<Pixmap>>,
     #[cfg(target_os = "macos")]
     video_layer: Option<video_layer_macos::VideoLayer>,
     #[cfg(target_os = "macos")]
@@ -169,7 +203,7 @@ impl Platform {
                     frame.width, frame.height, self.scale_factor(),
                 );
             }
-            let mut composite = pixmap.clone();
+            let mut composite = pixmap.as_ref().clone();
             paint_video_layer_for_capture(&mut composite, frame, self.scale_factor());
             composite.save_png(path).map_err(|error| error.to_string())?;
             return Ok((composite.width(), composite.height()));
@@ -190,6 +224,7 @@ impl Platform {
             width: size.width,
             height: size.height,
             pixmap: None,
+            framebuffer_pool: Vec::new(),
             #[cfg(target_os = "macos")]
             video_layer,
             #[cfg(target_os = "macos")]
@@ -208,6 +243,7 @@ impl Platform {
         #[cfg(target_os = "macos")]
         {
             self.video_layer.is_some()
+                && std::env::var_os("WEBCORE_DISABLE_NATIVE_VIDEO").is_none()
         }
         #[cfg(not(target_os = "macos"))]
         {
@@ -240,6 +276,7 @@ impl Platform {
         self.height = height.max(1);
         // Discard cached pixmap so next render reallocates at the new size.
         self.pixmap = None;
+        self.framebuffer_pool.clear();
         self.surface
             .resize(
                 std::num::NonZeroU32::new(self.width).unwrap(),
@@ -253,6 +290,15 @@ impl Platform {
     /// requested so hover transitions appear immediately without host app changes.
     /// The closure receives `(scale, pixmap)`.
     pub fn render<F: FnOnce(f32, &mut Pixmap)>(&mut self, draw: F) {
+        self.render_frame(true, draw);
+    }
+
+    /// Draw every pixel of the frame, without preserving the previous buffer.
+    pub fn render_full<F: FnOnce(f32, &mut Pixmap)>(&mut self, draw: F) {
+        self.render_frame(false, draw);
+    }
+
+    fn render_frame<F: FnOnce(f32, &mut Pixmap)>(&mut self, preserve: bool, draw: F) {
         let scale = self.scale_factor();
 
         // Reuse the pixmap across frames; only reallocate when dimensions change.
@@ -263,9 +309,20 @@ impl Platform {
             .map(|p| p.width() != self.width || p.height() != self.height)
             .unwrap_or(true);
         if need_new {
-            self.pixmap = Pixmap::new(self.width, self.height);
+            self.pixmap = Pixmap::new(self.width, self.height).map(Arc::new);
+        } else if self.pixmap.as_ref().is_some_and(|p| Arc::strong_count(p) != 1) {
+            // Core Animation may still be reading a previous frame. Recycle only
+            // buffers whose presentation owner has released them.
+            let next = recycle_framebuffer(self.pixmap.as_ref().unwrap(), &mut self.framebuffer_pool, preserve);
+            if let Some(previous) = self.pixmap.take() {
+                if self.framebuffer_pool.len() >= 3 {
+                    self.framebuffer_pool.remove(0);
+                }
+                self.framebuffer_pool.push(previous);
+            }
+            self.pixmap = next;
         }
-        let pixmap = match self.pixmap.as_mut() {
+        let pixmap = match self.pixmap.as_mut().and_then(Arc::get_mut) {
             Some(p) => p,
             None => return,
         };
@@ -274,6 +331,16 @@ impl Platform {
             let _span = crate::profile::span(crate::profile::Phase::PlatformDraw);
             draw(scale, pixmap);
         }
+
+        #[cfg(target_os = "macos")]
+        if let Some(layer) = self.video_layer.as_ref() {
+            let _span = crate::profile::span(crate::profile::Phase::PlatformPresent);
+            if layer.present_framebuffer(self.pixmap.as_ref().unwrap()) {
+                return;
+            }
+        }
+
+        let pixmap = self.pixmap.as_ref().unwrap();
 
         // Blit premultiplied RGBA bytes into softbuffer's 0xAARRGGBB pixels.
         let mut buf = self
@@ -295,12 +362,82 @@ impl Platform {
 mod tests {
     use super::*;
 
+    #[test]
+    fn video_cover_crop_uses_presentation_aspect_not_coded_aspect() {
+        let mut frame = VideoLayerFrame {
+            rgba: Arc::new(vec![255; 4 * 4 * 4]), source_width: 4, source_height: 4,
+            presentation_size: Some((8, 4)),
+            x: 0.0, y: 0.0, width: 100.0, height: 100.0, cover: true,
+            corner_radius: 0.0, tint: None, foreground: None,
+        };
+        assert!(frame.is_opaque());
+        assert_eq!(frame.contents_rect(), (0.25, 0.0, 0.5, 1.0));
+        frame.presentation_size = Some((4, 8));
+        assert_eq!(frame.contents_rect(), (0.0, 0.25, 1.0, 0.5));
+        frame.cover = false;
+        assert_eq!(frame.contents_rect(), (0.0, 0.0, 1.0, 1.0));
+        frame.cover = true;
+        frame.presentation_size = None;
+        assert_eq!(frame.contents_rect(), (0.0, 0.0, 1.0, 1.0));
+    }
+
+    #[test]
+    fn video_layer_opacity_requires_complete_nonempty_frames() {
+        let mut frame = VideoLayerFrame {
+            presentation_size: None,
+            rgba: Arc::new(vec![100, 50, 25, 255]),
+            source_width: 1, source_height: 1,
+            x: 0.0, y: 0.0, width: 1.0, height: 1.0,
+            cover: false, corner_radius: 0.0, tint: None, foreground: None,
+        };
+        assert!(frame.is_opaque());
+        for (width, height, pixels) in [
+            (0, 0, vec![]), (2, 1, vec![255; 4]),
+            (1, 1, vec![255; 5]), (1, 1, vec![100, 50, 25, 254]),
+            (u32::MAX, u32::MAX, vec![]),
+        ] {
+            frame.source_width = width;
+            frame.source_height = height;
+            frame.rgba = Arc::new(pixels);
+            assert!(!frame.is_opaque());
+        }
+    }
+
+    #[test]
+    fn framebuffer_recycling_preserves_partial_paints_and_live_presentations() {
+        let mut previous = Pixmap::new(4, 3).unwrap();
+        previous.fill(tiny_skia::Color::from_rgba8(30, 60, 90, 255));
+        let held = Arc::new(Pixmap::new(4, 3).unwrap());
+        let presentation = held.clone();
+        let reusable = Arc::new(Pixmap::new(4, 3).unwrap());
+        let address = reusable.data().as_ptr();
+        let mut pool = vec![held, reusable];
+        let mut next = recycle_framebuffer(&previous, &mut pool, true).unwrap();
+        assert_eq!(next.data().as_ptr(), address);
+        assert_eq!(next.data(), previous.data());
+        Arc::get_mut(&mut next).unwrap().data_mut()[0] = 1;
+        assert!(presentation.data().iter().all(|byte| *byte == 0));
+        assert_eq!(previous.data()[0], 30);
+        drop(presentation);
+        let address = pool[0].data().as_ptr();
+        let next = recycle_framebuffer(&previous, &mut pool, true).unwrap();
+        assert_eq!(next.data().as_ptr(), address);
+        assert_eq!(next.data(), previous.data());
+        let reusable = Arc::new(Pixmap::new(4, 3).unwrap());
+        let address = reusable.data().as_ptr();
+        pool.push(reusable);
+        let next = recycle_framebuffer(&previous, &mut pool, false).unwrap();
+        assert_eq!(next.data().as_ptr(), address);
+        assert!(next.data().iter().all(|byte| *byte == 0));
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn captured_frame_includes_native_video_layer() {
         let mut pixmap = Pixmap::new(8, 8).unwrap();
         pixmap.fill(tiny_skia::Color::from_rgba8(0, 0, 255, 255));
         let frame = VideoLayerFrame {
+            presentation_size: None,
             rgba: Arc::new(vec![255, 0, 0, 255]),
             source_width: 1,
             source_height: 1,
@@ -321,6 +458,15 @@ mod tests {
                 height: 1.0,
             }),
         };
+        assert!(frame.is_opaque());
+        let mut invalid = frame.clone();
+        invalid.source_width = 2;
+        assert!(!invalid.is_opaque());
+        invalid.source_width = 1;
+        invalid.rgba = Arc::new(vec![255, 0, 0, 254]);
+        assert!(!invalid.is_opaque());
+        invalid.rgba = Arc::new(vec![255, 0, 0, 255, 0]);
+        assert!(!invalid.is_opaque());
         paint_video_layer_for_capture(&mut pixmap, &frame, 1.0);
         assert_eq!(pixmap.pixel(3, 3).unwrap().green(), 255);
         assert_eq!(pixmap.pixel(4, 4).unwrap().red(), 255);

@@ -1,6 +1,176 @@
 // Ported from tests/test_css.cpp
 
 #[test]
+fn tab_size_uses_checked_number_or_length_grammar() {
+    for valid in [
+        "0",
+        "2.5",
+        "1e1",
+        "calc(2 + .5)",
+        "0px",
+        "24px",
+        "2em",
+        "calc(2em + 4px)",
+        "max(4px, 2em)",
+        "calc(-2px)",
+    ] {
+        let mut style = ComputedStyle::default();
+        apply_property(&mut style, "tab-size", valid);
+        assert_ne!(style.rare().tab_size, TabSize::INITIAL, "{valid}");
+        assert!(
+            crate::css::supports_condition_matches(&format!("(tab-size:{valid})")),
+            "{valid}"
+        );
+    }
+    for invalid in [
+        "-1",
+        "-1px",
+        "10%",
+        "calc(0% + 10px)",
+        "calc(10% - 10% + 4px)",
+        "auto",
+        "none",
+        "1px 2px",
+        "NaN",
+        "infinity",
+        "calc(2px +)",
+    ] {
+        let mut style = ComputedStyle::default();
+        apply_property(&mut style, "tab-size", "2.5");
+        apply_property(&mut style, "tab-size", invalid);
+        assert_eq!(style.rare().tab_size, TabSize::Number(2.5), "{invalid}");
+        assert!(
+            !crate::css::supports_condition_matches(&format!("(tab-size:{invalid})")),
+            "{invalid}"
+        );
+    }
+    let mut initial = ComputedStyle::default();
+    apply_property(&mut initial, "tab-size", "8");
+    assert!(initial.rare.is_none());
+}
+
+#[test]
+fn font_variant_groups_reject_conflicts_and_share_supports_grammar() {
+    for (property, valid, expected, invalid) in [
+        (
+            "font-variant-numeric",
+            "SLASHED-ZERO tabular-nums oldstyle-nums ordinal diagonal-fractions",
+            "oldstyle-nums tabular-nums diagonal-fractions ordinal slashed-zero",
+            vec![
+                "lining-nums oldstyle-nums",
+                "tabular-nums proportional-nums",
+                "ordinal ordinal",
+                "normal tabular-nums",
+                "none",
+            ],
+        ),
+        (
+            "font-variant-ligatures",
+            "contextual historical-ligatures no-common-ligatures",
+            "no-common-ligatures historical-ligatures contextual",
+            vec![
+                "contextual no-contextual",
+                "common-ligatures no-common-ligatures",
+                "normal contextual",
+                "none contextual",
+                "contextual contextual",
+            ],
+        ),
+        (
+            "font-variant-east-asian",
+            "ruby full-width jis2004",
+            "jis2004 full-width ruby",
+            vec![
+                "jis04",
+                "jis78 jis2004",
+                "full-width proportional-width",
+                "ruby ruby",
+                "normal ruby",
+            ],
+        ),
+    ] {
+        let read = |style: &ComputedStyle| match property {
+            "font-variant-numeric" => style.font_variant_numeric.clone(),
+            "font-variant-ligatures" => style.font_variant_ligatures.clone(),
+            _ => style.font_variant_east_asian.clone(),
+        };
+        let mut style = ComputedStyle::default();
+        apply_property(&mut style, property, valid);
+        assert_eq!(read(&style), expected);
+        assert!(crate::css::supports_condition_matches(&format!(
+            "({property}: {valid})"
+        )));
+        for invalid in invalid {
+            apply_property(&mut style, property, invalid);
+            assert_eq!(read(&style), expected, "{property}: {invalid}");
+            assert!(!crate::css::supports_condition_matches(&format!(
+                "({property}: {invalid})"
+            )));
+        }
+    }
+    let mut style = ComputedStyle::default();
+    apply_property(
+        &mut style,
+        "font-variant-numeric",
+        r"tabular-\6e ums/**/ordinal",
+    );
+    assert_eq!(style.font_variant_numeric, "tabular-nums ordinal");
+}
+
+#[test]
+fn tab_size_computes_lengths_before_inheritance() {
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        r#"<style>
+        #parent {font-size:20px; tab-size:2em}
+        #child {font-size:10px}
+        #number {tab-size:2.5}
+        #negative {tab-size:calc(-2px)}
+        #percent {tab-size:4;tab-size:calc(0% + 10px)}
+        #rootlength {tab-size:calc(1rem + 3px)}
+        html {font-size:18px}
+        </style><div id="parent"><span id="child">text</span></div>
+        <div id="number">text</div><div id="negative">text</div>
+        <div id="percent">text</div><div id="rootlength">text</div>"#,
+        800.0,
+    );
+    for (selector, expected) in [
+        ("#parent", "40px"),
+        ("#child", "40px"),
+        ("#number", "2.5"),
+        ("#negative", "0px"),
+        ("#percent", "4"),
+        ("#rootlength", "21px"),
+    ] {
+        let id = doc.query_selector(selector).unwrap();
+        assert_eq!(
+            doc.computed_style_property(id, "tab-size"),
+            expected,
+            "{selector}"
+        );
+    }
+}
+
+#[test]
+fn white_space_break_spaces_uses_checked_shared_grammar() {
+    for value in ["break-spaces", "BREAK-SPACES", r"break\2d spaces"] {
+        let mut style = ComputedStyle::default();
+        apply_property(&mut style, "white-space", value);
+        assert_eq!(style.white_space, WhiteSpace::BreakSpaces);
+        assert!(crate::css::supports_condition_matches(&format!(
+            "(white-space:{value})"
+        )));
+        for invalid in ["broken", "break-spaces nowrap", "break-spaces()"] {
+            apply_property(&mut style, "white-space", invalid);
+            assert_eq!(style.white_space, WhiteSpace::BreakSpaces);
+            assert!(!crate::css::supports_condition_matches(&format!(
+                "(white-space:{invalid})"
+            )));
+        }
+    }
+}
+
+#[test]
 fn border_grammar_preserves_valid_declarations_and_current_color() {
     for property in ["border", "border-right", "border-inline-start"] {
         for invalid in [
@@ -1967,6 +2137,45 @@ fn font_face_preserves_standard_descriptors() {
 }
 
 #[test]
+fn font_face_extraction_uses_rule_and_declaration_tokens() {
+    let mut faces = Vec::new();
+    crate::css::extract_font_faces(
+        r#"
+        @import url(a;{b);
+        .fake { content:'@font-face {font-family:Fake;src:local(Fake)}'; }
+        @unknown { @font-face {font-family:Hidden;src:local(Hidden)} }
+        @font-face-extra {font-family:Wrong;src:local(Wrong)}
+        @supports (unsupported-property:value) { @font-face {font-family:Unsupported;src:local(Wrong)} }
+        @supports (display:block) {
+          @f\6f nt-face {
+            font-family:"Semi;\7b Family";
+            s\72 c:local("Demo; {Local}");
+            font-weight:400; font-weight:900 !important;
+          }
+        }
+        @font-face {font-family:Tail;src:local(Tail)
+    "#,
+        &mut faces,
+    );
+    assert_eq!(faces.len(), 2);
+    assert_eq!(faces[0].family, "Semi;{Family");
+    assert_eq!(faces[0].src, r#"local("Demo; {Local}")"#);
+    assert_eq!(faces[0].weight.as_deref(), Some("400"));
+    assert_eq!(faces[1].family, "Tail");
+}
+
+#[test]
+fn font_face_definitions_inside_scope_are_global() {
+    let mut faces = Vec::new();
+    crate::css::extract_font_faces(
+        "@scope (.absent) { @font-face { font-family: Scoped; src: local(Scoped); } }",
+        &mut faces,
+    );
+    assert_eq!(faces.len(), 1);
+    assert_eq!(faces[0].family, "Scoped");
+}
+
+#[test]
 fn font_face_unicode_range_matches_ranges_and_wildcards() {
     use crate::css::font_face::unicode_range_intersects_text;
 
@@ -2051,6 +2260,7 @@ fn local_font_face_alias_is_available_to_fallback_stack() {
     let mut renderer = crate::Renderer::new();
     let html = r#"<style>
         @font-face { font-family: Site Fallback; src: local("Arial"); }
+        @font-face { font-family: Site Fallback; src: local("Arial"); font-weight: bold; }
         @font-face { font-family: Other Fallback; src: local("Arial"); }
         #title { font-family: Missing Site Face, Site Fallback; }
     </style><div id="title">Fallback text</div>"#;
@@ -4019,7 +4229,7 @@ fn font_shorthand_resets_omitted_longhands() {
     assert_eq!(style.font_style, FontStyle::Normal);
     assert_eq!(style.font_weight, FontWeight::Normal);
     assert!(!style.small_caps);
-    assert_eq!(style.line_height, CssLength::Em(1.2));
+    assert_eq!(style.line_height, CssLength::Auto);
     assert_eq!(style.font_size, CssLength::Px(14.0));
 }
 
@@ -5393,10 +5603,15 @@ fn positioned_pseudo_on_plain_inline_uses_owner_geometry() {
         .layout
         .padding_rect;
     assert_eq!(owner.x, 40.0);
-    assert!(
-        owner.y >= 30.0 && owner.w > 0.0 && owner.h > 0.0,
-        "{owner:?}"
-    );
+    let (ascent, descent, _) =
+        crate::layout::inline_layout::font_metrics(Some(&mut renderer.font_system), "Arial", 20.0);
+    let line = crate::dom::query_selector(&doc.root, "#link").unwrap();
+    let baseline = line.layout.line_cache[0].y + line.layout.line_cache[0].ascent;
+    // Negative leading puts the font-content edge above the line box.
+    // Chrome's Arial fixture gives y=29 and height=22, not y>=30.
+    assert!((owner.y - (baseline - ascent)).abs() < 0.01, "{owner:?}");
+    assert!((owner.h - ascent - descent).abs() < 0.01, "{owner:?}");
+    assert!(owner.w > 0.0);
     let decorations: Vec<_> = list
         .commands
         .iter()
@@ -11341,6 +11556,43 @@ fn computed_style_can_read_before_and_after_pseudo_styles() {
 }
 
 #[test]
+fn generated_pseudo_cssom_reuses_resolved_box_values_without_layout() {
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        r#"<style>
+        #owner { width: 200px; }
+        #owner::before { content: ""; display: block; width: 50%; height: 30px;
+            margin-left: 5px; padding: 3px; border: 2px solid red; box-sizing: border-box; }
+        #owner::after { content: ""; display: block; width: 40px; height: 12px;
+            margin-right: 7px; padding: 4px; background-color: blue; }
+        </style><div id='owner'>Text</div>"#,
+        400.0,
+    );
+    let owner = doc.get_element_by_id("owner").unwrap();
+    let generation = doc.layout_generation;
+    for (pseudo, property, expected) in [
+        ("::before", "width", "100px"),
+        ("::before", "height", "30px"),
+        ("::before", "margin-left", "5px"),
+        ("::before", "padding-left", "3px"),
+        ("::before", "border-left-width", "2px"),
+        ("::before", "box-sizing", "border-box"),
+        ("::after", "width", "40px"),
+        ("::after", "height", "12px"),
+        ("::after", "margin-right", "7px"),
+        ("::after", "padding-right", "4px"),
+        ("::after", "background-color", "rgb(0, 0, 255)"),
+    ] {
+        assert_eq!(
+            doc.computed_style_pseudo_property_current(owner, pseudo, property),
+            expected,
+            "{pseudo} {property}"
+        );
+    }
+    assert_eq!(doc.layout_generation, generation);
+}
+
+#[test]
 fn computed_style_can_read_stored_pseudo_element_styles() {
     let mut r = crate::Renderer::new();
     let mut d = r.load_html(
@@ -16994,6 +17246,86 @@ fn hover_applies_to_the_element_and_its_subtree() {
 }
 
 #[test]
+fn negated_hover_collapses_toolbar_before_any_pointer_event() {
+    for extra_rules in [0, 1001] {
+        let mut html = String::from(
+            "<style>body{margin:0}#bar{width:180px;height:30px}\
+             #bar:not(:hover)>a:not(:focus)>span+span{display:none}",
+        );
+        for index in 0..extra_rules {
+            html.push_str(&format!(".unused{index}{{color:red}}"));
+        }
+        html.push_str(
+            "</style><div id=bar><a href='#target'><span>→</span><span id=label>Toolbar</span></a><a href='#target'><span>→</span><span id=other-label>Other</span></a></div><p id=target>Target</p>",
+        );
+        let mut renderer = crate::Renderer::new();
+        let mut doc = renderer.load_html(&html, 400.0);
+        let label = doc.get_element_by_id("label").unwrap();
+        assert_eq!(
+            doc.get_node(label).unwrap().style.display,
+            crate::types::Display::None,
+            "toolbar must start collapsed; extra rules: {extra_rules}"
+        );
+        let other = doc.get_element_by_id("other-label").unwrap();
+        let tree_id = |id: &str| {
+            find_box(&doc.root, &|node| {
+                node.attributes.get("id").is_some_and(|value| value == id)
+            })
+            .unwrap()
+            .node_id
+        };
+        let bar_id = tree_id("bar");
+        let other_id = tree_id("other-label");
+        let hovered_chain = crate::css::build_hover_chain(&doc.root, bar_id);
+        crate::css::mark_hover_dirty(
+            &mut doc.root,
+            &doc.stylesheet,
+            &std::collections::HashSet::new(),
+            &hovered_chain,
+            true,
+            &std::collections::HashSet::from([other_id]),
+        );
+        assert!(
+            ["label", "other-label"].iter().all(|id| {
+                find_box(&doc.root, &|node| {
+                    node.attributes.get("id").is_some_and(|value| value == id)
+                })
+                .unwrap()
+                .cascade_dirty
+            }),
+            "the hover ancestor must dirty both branches, even with a nonempty sensitivity cache: bar={bar_id}, other={other_id}, hover rules={}",
+            doc.stylesheet
+                .rules
+                .iter()
+                .filter(|rule| rule.is_hover)
+                .count()
+        );
+        doc.process_mouse_event(crate::dom::HtmlEventType::MouseMove, (8.0, 8.0), 0);
+        renderer.layout_engine().layout(&mut doc, 400.0);
+        assert_eq!(
+            doc.get_node(label).unwrap().style.display,
+            crate::types::Display::Inline
+        );
+        assert_eq!(
+            doc.get_node(other).unwrap().style.display,
+            crate::types::Display::Inline,
+            "hovering the toolbar ancestor must update sibling items too"
+        );
+        doc.process_mouse_event(crate::dom::HtmlEventType::MouseMove, (350.0, 100.0), 0);
+        renderer.layout_engine().layout(&mut doc, 400.0);
+        assert_eq!(
+            doc.get_node(label).unwrap().style.display,
+            crate::types::Display::None,
+            "toolbar must collapse again after pointer exit"
+        );
+        assert_eq!(
+            doc.get_node(other).unwrap().style.display,
+            crate::types::Display::None
+        );
+    }
+}
+
+#[test]
 fn incremental_hover_matches_has_ancestor_rules_in_dirty_subtree() {
     let mut renderer = crate::Renderer::new();
     let mut doc = renderer.load_html(
@@ -17884,6 +18216,32 @@ fn font_face_metric_overrides_feed_normal_line_height() {
             && (descent - 10.0).abs() <= 0.5
             && (line_height - 55.0).abs() <= 0.5,
         "@font-face metric overrides should drive normal metrics, got ascent={ascent} descent={descent} line_height={line_height}"
+    );
+}
+
+#[test]
+fn initial_normal_line_height_uses_font_face_metric_overrides() {
+    assert!(ComputedStyle::default().line_height.is_auto());
+    let font = include_bytes!("fixtures/fonts/bootstrap-icons-1.11.3.woff2");
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(font);
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        &format!(
+            r#"<style>
+        @font-face {{ font-family: InitialMetrics; src: url(data:font/woff2;base64,{encoded});
+            size-adjust:110%; ascent-override:120%; descent-override:20%; line-gap-override:10%; }}
+        #metrics {{ font-family:InitialMetrics; font-size:20px; }}
+        </style><div id="metrics">A</div>"#
+        ),
+        400.0,
+    );
+    let metrics = crate::tests::test_grid::find_by_id(&doc.root, "metrics").unwrap();
+    assert!(metrics.style.line_height.is_auto());
+    assert!(
+        (metrics.layout.content_rect.h - 32.0).abs() <= 1.0,
+        "initial normal line-height must use adjusted face metrics, got {}",
+        metrics.layout.content_rect.h
     );
 }
 

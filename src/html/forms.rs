@@ -32,6 +32,13 @@ pub fn parse_integer(input: &str) -> Option<i64> {
     Some(if negative { -value } else { value })
 }
 
+/// Input states to which HTML maxlength/minlength constraints apply.
+pub(crate) fn supports_text_length_constraints(input_type: &str) -> bool {
+    ["text", "search", "url", "tel", "email", "password"]
+        .iter()
+        .any(|kind| input_type.eq_ignore_ascii_case(kind))
+}
+
 /// The **rules for parsing non-negative integers** (HTML §2.3.4.2): parse as an
 /// integer, then reject a negative result. `-1` is an ERROR, not a clamp.
 pub fn parse_non_negative_integer(input: &str) -> Option<u32> {
@@ -39,6 +46,25 @@ pub fn parse_non_negative_integer(input: &str) -> Option<u32> {
         Some(v) if v >= 0 => u32::try_from(v).ok(),
         _ => None,
     }
+}
+
+/// HTML textarea character dimensions, not CSS presentational hints.
+pub(crate) fn textarea_character_width(node: &WebCore) -> u32 {
+    const DEFAULT_COLUMNS: u32 = 20;
+    textarea_character_dimension(node, "cols", DEFAULT_COLUMNS)
+}
+
+pub(crate) fn textarea_character_height(node: &WebCore) -> u32 {
+    const DEFAULT_ROWS: u32 = 2;
+    textarea_character_dimension(node, "rows", DEFAULT_ROWS)
+}
+
+fn textarea_character_dimension(node: &WebCore, attribute: &str, default: u32) -> u32 {
+    node.attributes
+        .get(attribute)
+        .and_then(|value| parse_non_negative_integer(value))
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
 }
 
 /// The **rules for parsing floating-point number values** (HTML §2.3.4.3).
@@ -95,6 +121,88 @@ pub fn parse_floating_point(input: &str) -> Option<f64> {
     }
     let n: f64 = s[..end].parse().ok()?;
     if n.is_finite() { Some(n) } else { None }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProgressState {
+    pub value: f64,
+    pub max: f64,
+    pub indeterminate: bool,
+}
+
+impl ProgressState {
+    pub fn position(self) -> f64 {
+        if self.indeterminate {
+            -1.0
+        } else {
+            self.value / self.max
+        }
+    }
+}
+
+/// HTML progress values do not have a minimum attribute.
+pub fn progress_state<'a>(attribute: impl Fn(&str) -> Option<&'a str>) -> ProgressState {
+    let max = attribute("max")
+        .and_then(parse_floating_point)
+        .filter(|&value| value > 0.0)
+        .unwrap_or(1.0);
+    let raw = attribute("value");
+    let value = raw
+        .and_then(parse_floating_point)
+        .unwrap_or(0.0)
+        .clamp(0.0, max);
+    ProgressState {
+        value,
+        max,
+        indeterminate: raw.is_none(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MeterState {
+    pub min: f64,
+    pub max: f64,
+    pub value: f64,
+    pub low: f64,
+    pub high: f64,
+    pub optimum: f64,
+}
+
+/// Resolve in HTML's prescribed order; later boundaries depend on earlier ones.
+pub fn meter_state<'a>(attribute: impl Fn(&str) -> Option<&'a str>) -> MeterState {
+    let number = |name| attribute(name).and_then(parse_floating_point);
+    let min = number("min").unwrap_or(0.0);
+    let max = number("max").unwrap_or(1.0).max(min);
+    let value = number("value").unwrap_or(0.0).clamp(min, max);
+    let low = number("low").unwrap_or(min).clamp(min, max);
+    let high = number("high").unwrap_or(max).clamp(low, max);
+    let optimum = number("optimum")
+        .unwrap_or(min / 2.0 + max / 2.0)
+        .clamp(min, max);
+    MeterState {
+        min,
+        max,
+        value,
+        low,
+        high,
+        optimum,
+    }
+}
+
+impl MeterState {
+    pub fn fraction(self) -> f64 {
+        if self.max == self.min {
+            0.0
+        } else {
+            let span = self.max - self.min;
+            if span.is_finite() {
+                return (self.value - self.min) / span;
+            }
+            // Scaling first avoids overflow for finite endpoints spanning f64's range.
+            let scale = self.min.abs().max(self.max.abs()).max(1.0);
+            (self.value / scale - self.min / scale) / (self.max / scale - self.min / scale)
+        }
+    }
 }
 
 /// A **valid floating-point number** (HTML §2.3.4.3) — the AUTHORING grammar,
@@ -445,6 +553,43 @@ pub fn toggle_option(select: &mut WebCore, option_id: u32) -> bool {
     changed
 }
 
+/// Select an enabled range for a user gesture, replacing the selection unless additive.
+pub(crate) fn select_option_range(
+    select: &mut WebCore,
+    anchor_id: u32,
+    option_id: u32,
+    additive: bool,
+) -> bool {
+    let mut options = Vec::new();
+    for_each_option(select, &mut |o, group_disabled| {
+        options.push((o.node_id, option_is_disabled(o, group_disabled)));
+    });
+    let Some(end) = options
+        .iter()
+        .position(|&(id, disabled)| id == option_id && !disabled)
+    else {
+        return false;
+    };
+    let start = options
+        .iter()
+        .position(|&(id, _)| id == anchor_id)
+        .unwrap_or(end);
+    let range = start.min(end)..=start.max(end);
+    let mut index = 0;
+    let mut changed = false;
+    for_each_option_mut(select, &mut |o, group_disabled| {
+        let selected = (range.contains(&index) && !option_is_disabled(o, group_disabled))
+            || (additive && o.selectedness);
+        index += 1;
+        if o.selectedness != selected {
+            o.selectedness = selected;
+            o.dirty_selectedness = true;
+            changed = true;
+        }
+    });
+    changed
+}
+
 /// Unselect the selected option of a SINGLE-SELECT LIST BOX (HTML §4.10.7).
 ///
 /// "If the `multiple` attribute is absent and the element's display size is
@@ -721,23 +866,21 @@ pub fn list_box_row_at(
     font_px: f32,
     option_count: usize,
     click_y: f32,
+    scroll_top: f32,
 ) -> Option<usize> {
     let row_h = list_box_row_height(font_px);
     if row_h <= 0.0 {
         return None;
     }
-    let offset = click_y - (content_y + LIST_BOX_PADDING);
+    if click_y < content_y || click_y >= content_y + content_h {
+        return None;
+    }
+    let offset = click_y + scroll_top - (content_y + LIST_BOX_PADDING);
     if offset < 0.0 {
         return None;
     }
     let index = (offset / row_h).floor() as usize;
     if index >= option_count {
-        return None;
-    }
-    // The same clip the painter applies: a row whose bottom passes the content
-    // box was never drawn.
-    let row_y = content_y + LIST_BOX_PADDING + index as f32 * row_h;
-    if row_y + row_h > content_y + content_h - LIST_BOX_PADDING {
         return None;
     }
     Some(index)
@@ -795,18 +938,23 @@ pub fn value_mode(node: &WebCore) -> ValueMode {
 /// Run at parse time and again on reset — the two places a value arrives from
 /// the content attribute.
 pub fn seed_input_value(input: &mut WebCore) {
-    let is_range = input
-        .attributes
-        .get("type")
-        .map(|t| t.trim().eq_ignore_ascii_case("range"))
-        .unwrap_or(false);
-    if !is_range {
-        return;
+    let raw = input.attributes.get("value").map_or("", String::as_str);
+    if let Some(sanitized) = sanitize_input_value(input, raw) {
+        input.value_state = Some(sanitized);
+        input.dirty_value = false;
     }
-    let raw = input.attributes.get("value").cloned().unwrap_or_default();
-    let sanitized = sanitize_range_value(input, &raw);
-    input.value_state = Some(best_representation(sanitized));
-    input.dirty_value = false;
+}
+
+pub(crate) fn sanitize_input_value(input: &WebCore, raw: &str) -> Option<String> {
+    let input_type = input.attributes.get("type").map_or("text", String::as_str);
+    if input_type.eq_ignore_ascii_case("range") {
+        Some(best_representation(sanitize_range_value(input, raw)))
+    } else {
+        let kind = ["date", "month", "week", "time", "datetime-local"]
+            .into_iter()
+            .find(|kind| input_type.eq_ignore_ascii_case(kind))?;
+        super::temporal::sanitize(kind, raw)
+    }
 }
 
 #[cfg(test)]

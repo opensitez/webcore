@@ -3,6 +3,179 @@ use crate::tests::harness::{find_box, parse, parse_and_layout};
 use crate::types::*;
 
 #[test]
+fn grid_bare_named_rows_preserve_hero_spacer_tracks() {
+    let doc = parse_and_layout(
+        r#"<style>
+          * { margin:0; padding:0 }
+          #grid { display:grid; width:400px; grid-template-columns:1fr;
+            grid-template-rows:40px [logo] auto 8px [heading] auto 24px [download] auto 64px }
+          #grid > div { grid-column:1 / -1 }
+          #logo { grid-row:logo; height:63px }
+          #heading { grid-row:heading; height:168px }
+          #download { grid-row:download }
+          #download > div { height:198px }
+        </style><div id=grid><div id=logo></div><div id=heading></div>
+          <div id=download><div></div></div></div>"#,
+        500.0,
+    );
+    for (id, y, h) in [
+        ("logo", 40.0, 63.0),
+        ("heading", 111.0, 168.0),
+        ("download", 303.0, 198.0),
+    ] {
+        let item = find_by_id(&doc.root, id).unwrap();
+        let rect = item.layout.border_rect;
+        assert!(
+            (rect.y - y).abs() < 0.1 && (rect.h - h).abs() < 0.1,
+            "{id}: {rect:?}"
+        );
+        assert_eq!(item.style.grid_row_start_name, id);
+        assert_eq!(item.style.grid_row_end_name, id);
+    }
+    let grid = find_by_id(&doc.root, "grid").unwrap().layout.border_rect;
+    assert!((grid.h - 565.0).abs() < 0.1, "{grid:?}");
+}
+
+#[test]
+fn grid_bare_named_lines_lock_rows_and_columns_during_auto_placement() {
+    let doc = parse_and_layout(
+        r#"<style>* { margin:0; padding:0 }
+          #grid { display:grid; width:100px;
+            grid-template-columns:20px [content] 80px;
+            grid-template-rows:30px [heading] 40px }
+          #row { grid-row:heading }
+          #column { grid-column:content }
+        </style><div id=grid><div id=row></div><div id=column></div></div>"#,
+        200.0,
+    );
+    let row = find_by_id(&doc.root, "row").unwrap().layout.border_rect;
+    let column = find_by_id(&doc.root, "column").unwrap().layout.border_rect;
+    assert!(
+        (row.x - 0.0).abs() < 0.1 && (row.y - 30.0).abs() < 0.1,
+        "{row:?}"
+    );
+    assert!(
+        (column.x - 20.0).abs() < 0.1 && (column.y - 0.0).abs() < 0.1,
+        "{column:?}"
+    );
+}
+
+#[test]
+fn grid_named_area_edges_precede_same_named_explicit_lines() {
+    for placement in [
+        "grid-row:heading;grid-column:heading",
+        "grid-row-start:heading;grid-row-end:heading;grid-column-start:heading;grid-column-end:heading",
+        "grid-area:heading",
+    ] {
+        for earlier_edge in [false, true] {
+            let edge = if earlier_edge { "[heading-start]" } else { "" };
+            let doc = parse_and_layout(
+                &format!(
+                    r#"<style>* {{ margin:0; padding:0 }}
+                  #grid {{ display:grid; width:90px;
+                    grid-template-columns:[heading] 20px {edge} 30px 40px;
+                    grid-template-rows:[heading] 20px {edge} 30px 40px;
+                    grid-template-areas:'. . .' '. . .' '. . heading' }}
+                  #item {{ {placement} }}
+                </style><div id=grid><div id=item></div></div>"#
+                ),
+                200.0,
+            );
+            let rect = find_by_id(&doc.root, "item").unwrap().layout.border_rect;
+            let (offset, size) = if earlier_edge {
+                (20.0, 70.0)
+            } else {
+                (50.0, 40.0)
+            };
+            assert!(
+                (rect.x - offset).abs() < 0.1
+                    && (rect.y - offset).abs() < 0.1
+                    && (rect.w - size).abs() < 0.1
+                    && (rect.h - size).abs() < 0.1,
+                "{placement}, earlier_edge={earlier_edge}: {rect:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn grid_literal_suffixed_identifiers_keep_their_own_edge_precedence() {
+    for nested_edges in [false, true] {
+        let nested_start = if nested_edges {
+            "[heading-start-start]"
+        } else {
+            ""
+        };
+        let nested_end = if nested_edges {
+            "[heading-end-end]"
+        } else {
+            ""
+        };
+        let doc = parse_and_layout(
+            &format!(
+                r#"<style>* {{ margin:0; padding:0 }}
+              #grid {{ display:grid; width:100px; grid-template-columns:1fr;
+                grid-template-rows:[heading] 10px [heading-start] 20px {nested_start}
+                  30px [heading-end] 40px {nested_end} }}
+              #item {{ grid-column:1; grid-row:heading-start / heading-end }}
+            </style><div id=grid><div id=item></div></div>"#
+            ),
+            200.0,
+        );
+        let item = find_by_id(&doc.root, "item").unwrap();
+        assert_eq!(item.style.grid_row_start_name, "heading-start");
+        assert_eq!(item.style.grid_row_end_name, "heading-end");
+        let rect = item.layout.border_rect;
+        let (y, h) = if nested_edges {
+            (30.0, 70.0)
+        } else {
+            (10.0, 50.0)
+        };
+        assert!(
+            (rect.y - y).abs() < 0.1 && (rect.h - h).abs() < 0.1,
+            "{rect:?}"
+        );
+    }
+}
+
+#[test]
+fn grid_numbered_names_bypass_area_edges_and_default_end_to_auto() {
+    for (name, offset, size) in [
+        ("heading 2", 10.0, 20.0),
+        ("2 heading", 10.0, 20.0),
+        ("heading -2", 60.0, 40.0),
+        ("-2 heading", 60.0, 40.0),
+    ] {
+        let doc = parse_and_layout(
+            &format!(
+                r#"<style>* {{ margin:0; padding:0 }}
+              #grid {{ display:grid; width:100px;
+                grid-template-columns:[heading heading-start] 10px [heading] 20px [heading]
+                  30px [heading] 40px [heading heading-end];
+                grid-template-rows:[heading heading-start] 10px [heading] 20px [heading]
+                  30px [heading] 40px [heading heading-end] }}
+              #item {{ grid-row:{name}; grid-column:{name} }}
+            </style><div id=grid><div id=item></div></div>"#
+            ),
+            200.0,
+        );
+        let item = find_by_id(&doc.root, "item").unwrap();
+        assert_eq!(item.style.grid_row_start_name, name);
+        assert_eq!(item.style.grid_column_start_name, name);
+        assert!(item.style.grid_row_end_name.is_empty());
+        assert!(item.style.grid_column_end_name.is_empty());
+        let rect = item.layout.border_rect;
+        assert!(
+            (rect.x - offset).abs() < 0.1
+                && (rect.y - offset).abs() < 0.1
+                && (rect.w - size).abs() < 0.1
+                && (rect.h - size).abs() < 0.1,
+            "{name}: {rect:?}"
+        );
+    }
+}
+
+#[test]
 fn nested_grid_measurement_reuses_unchanged_child_layout() {
     let mut html = String::from(
         "<style>*{margin:0;padding:0}.nest{display:grid;grid-template-columns:1fr;grid-template-rows:1fr;width:400px}</style>",
@@ -249,7 +422,7 @@ fn justify_self_end_auto_width_grid_item_uses_content_width() {
 }
 
 #[test]
-fn unresolved_var_in_calc_does_not_poison_previous_declaration() {
+fn unresolved_var_in_calc_resets_winning_width_to_initial() {
     let html = r#"
         <style>#box { width: 120px; }</style>
         <div id="box" style="width: calc(100% / (2 + var(--missing)) - 8px); height: 10px"></div>
@@ -257,7 +430,9 @@ fn unresolved_var_in_calc_does_not_poison_previous_declaration() {
     let doc = parse_and_layout(html, 800.0);
     let b = find_by_id(&doc.root, "box").unwrap();
 
-    assert_eq!(b.layout.border_rect.w, 120.0);
+    // Invalid at computed-value time uses the initial value, not an earlier cascade winner.
+    assert!(b.style.width.is_auto());
+    assert!((b.layout.border_rect.w - 784.0).abs() < 0.1);
 }
 
 #[test]
@@ -1764,6 +1939,227 @@ fn grid_a_spanning_item_still_gets_its_height() {
 
 // ── Column-axis track sizing (CSS Grid §12.5-12.7) ───────────────────────────
 
+#[test]
+fn grid_equal_span_growth_is_independent_of_item_order() {
+    for gap in [0.0, 10.0] {
+        for reversed in [false, true] {
+            for rows in [false, true] {
+                let axis = if rows { "row" } else { "column" };
+                let dimension = if rows { "height" } else { "width" };
+                let other_axis = if rows { "column" } else { "row" };
+                let spans = [
+                    format!(
+                        "<div style='grid-{axis}:1/3;grid-{other_axis}:2;{dimension}:100px'></div>"
+                    ),
+                    format!(
+                        "<div style='grid-{axis}:2/4;grid-{other_axis}:3;{dimension}:100px'></div>"
+                    ),
+                ];
+                let mut items = String::new();
+                for index in 1..=3 {
+                    items.push_str(&format!(
+                        "<div style='grid-{axis}:{index};grid-{other_axis}:1;{dimension}:10px'></div>\
+                         <div id='marker{index}' style='grid-{axis}:{index};grid-{other_axis}:4'></div>"
+                    ));
+                }
+                for index in if reversed { [1, 0] } else { [0, 1] } {
+                    items.push_str(&spans[index]);
+                }
+                let html = format!(
+                    "<style>*{{margin:0;padding:0}}.grid{{display:grid;width:300px;\
+                     grid-template-{axis}s:auto auto auto;gap:{gap}px;\
+                     justify-content:start;align-content:start}}</style>\
+                     <div class='grid'>{items}</div>"
+                );
+                let doc = parse_and_layout(&html, 1000.0);
+                let expected = (100.0 - gap) / 2.0;
+                let origin = find_by_id(&doc.root, "marker1").unwrap().layout.border_rect;
+                for index in 1..=3 {
+                    let rect = find_by_id(&doc.root, &format!("marker{index}"))
+                        .unwrap()
+                        .layout
+                        .border_rect;
+                    let (size, offset) = if rows {
+                        (rect.h, rect.y - origin.y)
+                    } else {
+                        (rect.w, rect.x - origin.x)
+                    };
+                    assert!(
+                        (size - expected).abs() < 0.5,
+                        "{axis}, gap={gap}, reversed={reversed}, track={index}: {size} != {expected}"
+                    );
+                    let expected_offset = (index - 1) as f32 * (expected + gap);
+                    assert!(
+                        (offset - expected_offset).abs() < 0.5,
+                        "{axis}, gap={gap}, reversed={reversed}, track={index}: offset {offset} != {expected_offset}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn grid_spanning_growth_accounts_for_fixed_tracks() {
+    for tracks in [
+        "100px auto",
+        "25% auto",
+        "calc(50px + 50px) auto",
+        "auto 100px",
+    ] {
+        let doc = parse_and_layout(
+            &format!(
+                "<style>*{{margin:0;padding:0}}.grid{{display:grid;width:400px;\
+             grid-template-columns:{tracks};justify-content:start}}</style>\
+             <div class='grid'><div style='grid-column:1/3;width:300px;height:10px'></div>\
+             <div id='first' style='grid-column:1;height:10px'></div>\
+             <div id='second' style='grid-column:2;height:10px'></div></div>"
+            ),
+            1000.0,
+        );
+        let expected = if tracks.starts_with("auto") {
+            [200.0, 100.0]
+        } else {
+            [100.0, 200.0]
+        };
+        for (id, width) in ["first", "second"].into_iter().zip(expected) {
+            let actual = find_by_id(&doc.root, id).unwrap().layout.border_rect.w;
+            assert!(
+                (actual - width).abs() < 0.5,
+                "{tracks}: {id} {actual} != {width}"
+            );
+        }
+    }
+}
+
+#[test]
+fn grid_spanning_row_growth_accounts_for_fixed_tracks() {
+    for (tracks, gap, expected) in [
+        ("100px auto", 0.0, [100.0, 200.0]),
+        ("25% auto", 0.0, [100.0, 200.0]),
+        ("calc(50px + 50px) auto", 0.0, [100.0, 200.0]),
+        ("auto 100px", 0.0, [200.0, 100.0]),
+        ("100px auto", 10.0, [100.0, 190.0]),
+        ("0px auto", 0.0, [0.0, 300.0]),
+    ] {
+        let doc = parse_and_layout(
+            &format!(
+                "<style>*{{margin:0;padding:0}}.grid{{display:grid;width:100px;height:400px;\
+             grid-template-columns:20px 20px;grid-template-rows:{tracks};gap:{gap}px;align-content:start}}</style>\
+             <div class='grid'><div style='grid-row:1/3;grid-column:1;height:300px'></div>\
+             <div id='first' style='grid-row:1;grid-column:2'></div>\
+             <div id='second' style='grid-row:2;grid-column:2'></div></div>"
+            ),
+            1000.0,
+        );
+        for (id, height) in ["first", "second"].into_iter().zip(expected) {
+            let actual = find_by_id(&doc.root, id).unwrap().layout.border_rect.h;
+            assert!(
+                (actual - height).abs() < 0.5,
+                "{tracks}, gap={gap}: {id} {actual} != {height}"
+            );
+        }
+    }
+}
+
+#[test]
+fn grid_fixed_implicit_rows_do_not_expand_for_content() {
+    for height in [0.0, 25.0] {
+        let doc = parse_and_layout(
+            &format!(
+                "<style>*{{margin:0;padding:0}}.grid{{display:grid;width:100px;\
+             grid-auto-rows:{height}px;grid-template-columns:50px 50px}}</style>\
+             <div class='grid'><div style='height:100px'></div><div id='marker'></div></div>"
+            ),
+            1000.0,
+        );
+        let actual = find_by_id(&doc.root, "marker")
+            .unwrap()
+            .layout
+            .border_rect
+            .h;
+        assert!(
+            (actual - height).abs() < 0.5,
+            "fixed implicit row {height}: {actual}"
+        );
+    }
+}
+
+#[test]
+fn grid_cyclic_row_calculations_use_intrinsic_then_used_sizing() {
+    for (tracks, spanning, height, expected) in [
+        (
+            "grid-template-rows:calc(50px + 50%) auto",
+            false,
+            200.0,
+            [150.0, 100.0],
+        ),
+        (
+            "grid-auto-rows:calc(50px + 50%)",
+            false,
+            200.0,
+            [150.0, 150.0],
+        ),
+        (
+            "grid-template-rows:calc(50px + 50%) auto",
+            true,
+            300.0,
+            [200.0, 100.0],
+        ),
+        ("grid-template-rows:50% auto", true, 300.0, [150.0, 150.0]),
+        (
+            "grid-template-rows:calc(50px + 50%) auto;min-height:300px",
+            false,
+            300.0,
+            [200.0, 100.0],
+        ),
+        (
+            "grid-template-rows:calc(50px + 50%) auto;max-height:150px",
+            false,
+            150.0,
+            [125.0, 100.0],
+        ),
+    ] {
+        let content = if spanning {
+            "<div style='grid-row:1/3;grid-column:1;height:300px'></div>"
+        } else {
+            "<div style='grid-row:1;grid-column:1;height:100px'></div>\
+             <div style='grid-row:2;grid-column:1;height:100px'></div>"
+        };
+        let doc = parse_and_layout(
+            &format!(
+                "<style>*{{margin:0;padding:0}}.grid{{display:grid;width:100px;\
+             grid-template-columns:50px 50px;align-content:start;{tracks}}}</style>\
+             <div id='grid' class='grid'>{content}\
+             <div id='first' style='grid-row:1;grid-column:2'></div>\
+             <div id='second' style='grid-row:2;grid-column:2'></div></div>"
+            ),
+            1000.0,
+        );
+        let grid = find_by_id(&doc.root, "grid").unwrap().layout.border_rect;
+        assert!(
+            (grid.h - height).abs() < 0.5,
+            "{tracks}: container {} != {height}",
+            grid.h
+        );
+        for (index, id) in ["first", "second"].into_iter().enumerate() {
+            let actual = find_by_id(&doc.root, id).unwrap().layout.border_rect;
+            assert!(
+                (actual.h - expected[index]).abs() < 0.5,
+                "{tracks}, spanning={spanning}: {id} {} != {}",
+                actual.h,
+                expected[index]
+            );
+            let offset = if index == 0 { 0.0 } else { expected[0] };
+            assert!(
+                (actual.y - grid.y - offset).abs() < 0.5,
+                "{tracks}: {id} offset {} != {offset}",
+                actual.y - grid.y
+            );
+        }
+    }
+}
+
 /// **§12.5 — a spanning item contributes its EXCESS on the COLUMN axis too.**
 /// The row axis already did this; columns divided the item's max-content width
 /// by its span and used the quotient as a FLOOR on every spanned track, which
@@ -2379,4 +2775,281 @@ fn non_replaced_width_attribute_does_not_constrain_grid_container() {
         "main track should receive remaining space, got {}",
         main.layout.border_rect.w
     );
+}
+
+#[test]
+fn grid_fractional_rows_auto_height_and_overflow_minimums() {
+    let doc = parse_and_layout(
+        r#"<style>
+        body { margin:0 }
+        .grid { display:grid; width:200px }
+        .item { padding:1px; overflow:hidden }
+        .content { height:100px }
+        </style>
+        <div id="closed" class="grid" style="grid-template-rows:0fr"><div class="item"><div class="content"></div></div></div>
+        <div id="visible" class="grid" style="grid-template-rows:0fr"><div style="padding:1px"><div class="content"></div></div></div>
+        <div id="fixed-min" class="grid" style="grid-template-rows:minmax(0px,0fr)"><div class="item"><div class="content"></div></div></div>
+        <div id="partial" class="grid" style="grid-template-rows:0.5fr"><div style="overflow:hidden"><div class="content"></div></div></div>
+        <div id="unequal" class="grid" style="grid-template-rows:1fr 2fr"><div style="overflow:hidden"><div class="content"></div></div><div style="overflow:hidden"><div class="content"></div></div></div>"#,
+        1000.0,
+    );
+    for (id, expected) in [
+        ("closed", 2.0),
+        ("visible", 102.0),
+        ("fixed-min", 0.0),
+        ("partial", 50.0),
+        ("unequal", 300.0),
+    ] {
+        let height = find_by_id(&doc.root, id).unwrap().layout.border_rect.h;
+        assert!(
+            (height - expected).abs() < 0.5,
+            "{id}: expected {expected}, got {height}"
+        );
+    }
+    let partial = find_by_id(&doc.root, "partial").unwrap();
+    let item = &partial.effective_children()[0];
+    assert!(
+        (item.layout.border_rect.h - 25.0).abs() < 0.5,
+        "the used half-fraction row is 25px inside its 50px intrinsic container, got {}",
+        item.layout.border_rect.h
+    );
+}
+
+#[test]
+fn grid_spanning_rows_respect_minmax_sizing_functions() {
+    for (tracks, first, second) in [
+        ("minmax(100px,100px) auto", 100.0, 200.0),
+        ("minmax(100px,200px) auto", 200.0, 200.0),
+        ("minmax(0px,100px) auto", 100.0, 300.0),
+        ("minmax(auto,100px) auto", 100.0, 200.0),
+        ("minmax(100px,auto) auto", 100.0, 200.0),
+    ] {
+        let doc = parse_and_layout(
+            &format!(
+                r#"<style>
+            body {{ margin:0 }}
+            #grid {{ display:grid; width:120px; grid-template-rows:{tracks}; grid-template-columns:1fr }}
+            </style><div id="grid">
+            <div style="grid-row:1/3;grid-column:1;height:300px"></div>
+            <div id="first" style="grid-row:1;grid-column:1"></div>
+            <div id="second" style="grid-row:2;grid-column:1"></div>
+            </div>"#
+            ),
+            1000.0,
+        );
+        for (id, expected) in [
+            ("first", first),
+            ("second", second),
+            ("grid", first + second),
+        ] {
+            let actual = find_by_id(&doc.root, id).unwrap().layout.border_rect.h;
+            assert!(
+                (actual - expected).abs() < 0.5,
+                "{tracks}, {id}: expected {expected}, got {actual}"
+            );
+        }
+    }
+}
+
+#[test]
+fn grid_definite_rows_maximize_to_growth_limits_before_flex_and_alignment() {
+    for (tracks, height, gap, alignment, span_height, first, second) in [
+        (
+            "minmax(100px,200px) auto",
+            500,
+            0,
+            "start",
+            300,
+            200.0,
+            200.0,
+        ),
+        (
+            "minmax(100px,200px) auto",
+            350,
+            0,
+            "start",
+            300,
+            150.0,
+            200.0,
+        ),
+        (
+            "minmax(100px,200px) auto",
+            500,
+            0,
+            "stretch",
+            300,
+            200.0,
+            300.0,
+        ),
+        (
+            "minmax(50px,100px) minmax(50px,300px)",
+            300,
+            20,
+            "start",
+            100,
+            100.0,
+            180.0,
+        ),
+        (
+            "minmax(100px,200px) 1fr",
+            500,
+            0,
+            "start",
+            300,
+            200.0,
+            300.0,
+        ),
+        (
+            "minmax(100px,200px) auto",
+            250,
+            0,
+            "start",
+            300,
+            100.0,
+            200.0,
+        ),
+        (
+            "minmax(100px,200px) minmax(50px,200px)",
+            180,
+            0,
+            "start",
+            100,
+            115.0,
+            65.0,
+        ),
+        (
+            "minmax(100px,50px) auto",
+            300,
+            0,
+            "start",
+            300,
+            100.0,
+            200.0,
+        ),
+    ] {
+        let doc = parse_and_layout(
+            &format!(
+                r#"<style>
+        body {{ margin:0 }}
+        #grid {{ display:grid; width:120px; height:{height}px; row-gap:{gap}px;
+        grid-template-rows:{tracks}; grid-template-columns:1fr; align-content:{alignment} }}
+        </style><div id="grid">
+        <div style="grid-row:1/3;grid-column:1;height:{span_height}px"></div>
+        <div id="first" style="grid-row:1;grid-column:1"></div>
+        <div id="second" style="grid-row:2;grid-column:1"></div></div>"#
+            ),
+            1000.0,
+        );
+        for (id, expected) in [("first", first), ("second", second)] {
+            let actual = find_by_id(&doc.root, id).unwrap().layout.border_rect.h;
+            assert!(
+                (actual - expected).abs() < 0.5,
+                "{tracks}, height:{height}, gap:{gap}, align:{alignment}, {id}: expected {expected}, got {actual}"
+            );
+        }
+    }
+}
+
+#[test]
+fn grid_fractional_tracks_freeze_minimums_and_leave_partial_space() {
+    let doc = parse_and_layout(
+        r#"<style>body { margin:0 } .grid { display:grid; width:300px }</style>
+        <div class="grid" style="grid-template-columns:minmax(200px,1fr) minmax(0px,1fr)"><div></div><div id="column"></div></div>
+        <div class="grid" style="grid-template-columns:minmax(0px,0.25fr) minmax(0px,0.25fr)"><div></div><div id="partial-column"></div></div>
+        <div class="grid" style="height:300px;grid-template-rows:minmax(200px,1fr) minmax(0px,1fr)"><div></div><div id="row"></div></div>
+        <div class="grid" style="height:300px;grid-template-rows:minmax(0px,0.25fr) minmax(0px,0.25fr)"><div></div><div id="partial-row"></div></div>"#,
+        1000.0,
+    );
+    for (id, expected, vertical) in [
+        ("column", 100.0, false),
+        ("partial-column", 75.0, false),
+        ("row", 100.0, true),
+        ("partial-row", 75.0, true),
+    ] {
+        let rect = find_by_id(&doc.root, id).unwrap().layout.border_rect;
+        let size = if vertical { rect.h } else { rect.w };
+        assert!(
+            (size - expected).abs() < 0.5,
+            "{id}: expected {expected}, got {size}"
+        );
+    }
+}
+
+#[test]
+fn grid_height_limits_redistribute_fractional_rows() {
+    let doc = parse_and_layout(
+        r#"<style>
+        body { margin:0 } .grid { display:grid; width:200px;grid-template-rows:1fr 2fr }
+        .item { overflow:hidden } .content { height:100px }
+        </style>
+        <div id="minimum" class="grid" style="min-height:600px"><div class="item"><div class="content"></div></div><div class="item"><div class="content"></div></div></div>
+        <div id="maximum" class="grid" style="max-height:150px"><div class="item"><div class="content"></div></div><div class="item"><div class="content"></div></div></div>
+        <div id="visible-limit" class="grid" style="max-height:150px"><div><div class="content"></div></div><div><div class="content"></div></div></div>
+        <div id="conflict" style="display:grid;grid-template-rows:1fr;min-height:200px;max-height:100px"><div></div></div>
+        <div id="border-limit" style="display:grid;grid-template-rows:1fr;box-sizing:border-box;padding:10px;border:2px solid;height:500px;max-height:200px"><div></div></div>
+        <div id="empty-limit" style="display:grid;min-height:75px;max-height:10px"></div>
+        <div><div id="unresolved-limit" style="display:grid;grid-template-rows:1fr;max-height:50%"><div class="content"></div></div></div>"#,
+        1000.0,
+    );
+    for (id, height, first, second) in [
+        ("minimum", 600.0, 200.0, Some(400.0)),
+        ("maximum", 150.0, 50.0, Some(100.0)),
+        ("visible-limit", 150.0, 100.0, Some(100.0)),
+        ("conflict", 200.0, 200.0, None),
+        ("border-limit", 200.0, 176.0, None),
+        ("unresolved-limit", 100.0, 100.0, None),
+    ] {
+        let node = find_by_id(&doc.root, id).unwrap();
+        assert!(
+            (node.layout.border_rect.h - height).abs() < 0.5,
+            "{id}: height {} vs {height}",
+            node.layout.border_rect.h
+        );
+        let items = node.effective_children();
+        assert!(
+            (items[0].layout.border_rect.h - first).abs() < 0.5,
+            "{id}: first row {} vs {first}",
+            items[0].layout.border_rect.h
+        );
+        if let Some(second) = second {
+            assert!(
+                (items[1].layout.border_rect.h - second).abs() < 0.5,
+                "{id}: second row {} vs {second}",
+                items[1].layout.border_rect.h
+            );
+        }
+    }
+    assert!(
+        (find_by_id(&doc.root, "empty-limit")
+            .unwrap()
+            .layout
+            .border_rect
+            .h
+            - 75.0)
+            .abs()
+            < 0.5
+    );
+}
+
+#[test]
+fn grid_string_api_uses_typed_tracks_and_shared_fractions() {
+    use crate::layout::grid::parse_track_sizes;
+    for (value, expected) in [
+        ("minmax(200px, 1fr) minmax(0px, 1fr)", vec![200.0, 100.0]),
+        ("repeat(2, minmax(0px, 0.25fr))", vec![75.0, 75.0]),
+        (
+            "[start] calc(2em + 10px) [middle] 1fr [end]",
+            vec![50.0, 250.0],
+        ),
+        ("repeat(auto-fill, 100px)", vec![100.0, 100.0, 100.0]),
+    ] {
+        let actual = parse_track_sizes(value, 300.0, 20.0, 20.0);
+        assert_eq!(actual.len(), expected.len(), "{value}: {actual:?}");
+        for (actual, expected) in actual.iter().zip(expected) {
+            assert!(
+                (actual - expected).abs() < 0.5,
+                "{value}: {actual} vs {expected}"
+            );
+        }
+    }
 }

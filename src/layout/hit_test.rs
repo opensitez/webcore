@@ -3,6 +3,7 @@
 
 use crate::layout::inline_layout::collect_flat_text;
 use crate::types::*;
+use unicode_segmentation::UnicodeSegmentation;
 
 // ─── Character-width approximation ───────────────────────────────────────────
 // Matches the renderer's approx_text_width_ls — same coefficients.
@@ -126,10 +127,6 @@ pub fn get_caret_x(text: &str, runs: &[InlineRun], line: &LayoutLine, offset: us
 
 /// Returns the text byte-offset closest to `x` pixels within `line`.
 pub fn get_offset_from_x(text: &str, runs: &[InlineRun], line: &LayoutLine, x: f32) -> usize {
-    if x <= line.x {
-        return line.text_start;
-    }
-
     let line_end = line.text_start + line.text_length;
 
     // Fast path: use pre-computed char_x positions for pixel-accurate click mapping.
@@ -139,22 +136,29 @@ pub fn get_offset_from_x(text: &str, runs: &[InlineRun], line: &LayoutLine, x: f
         let range_end = line.char_x.len() - 1; // last entry is end-of-line position
         let line_start = line.text_start;
         let measure_end = line_start + range_end;
-        // Walk character boundaries, return where rel_x falls before the midpoint.
+        // Bidi boundaries need not be monotonic in logical text order.
+        // Choose a valid shaped boundary rather than assuming LTR advances.
         let flat_slice_s = floor_char_boundary(text, line_start.min(text.len()));
         let flat_slice_e = floor_char_boundary(text, measure_end.min(text.len()));
-        let mut byte_off = line_start;
-        for ch in text[flat_slice_s..flat_slice_e].chars() {
-            let i = byte_off - line_start;
-            let next = byte_off + ch.len_utf8();
-            let ni = (next - line_start).min(line.char_x.len() - 1);
-            let x0 = line.char_x[i];
-            let x1 = line.char_x[ni];
-            if rel_x < x0 + (x1 - x0) / 2.0 {
-                return byte_off;
+        let mut nearest = flat_slice_s;
+        let mut distance = f32::INFINITY;
+        for offset in text[flat_slice_s..flat_slice_e]
+            .grapheme_indices(true)
+            .map(|(at, _)| flat_slice_s + at)
+            .chain(std::iter::once(flat_slice_e))
+        {
+            let index = offset.saturating_sub(line_start).min(range_end);
+            let candidate = (rel_x - line.char_x[index]).abs();
+            if candidate < distance {
+                distance = candidate;
+                nearest = offset;
             }
-            byte_off = next;
         }
-        return measure_end;
+        return nearest;
+    }
+
+    if x <= line.x {
+        return line.text_start;
     }
 
     // Strip trailing newline from measurement
@@ -313,6 +317,19 @@ pub struct HitResult {
     pub local_offset: usize,
 }
 
+fn resolve_anonymous_hit(parent: &WebCore, child: &WebCore, mut hit: HitResult) -> HitResult {
+    if hit.node_id != 0 {
+        return hit;
+    }
+    // Formatting fragments have no DOM identity. Express their rendered-text
+    // offsets relative to the real container that owns them instead.
+    let prefix = crate::layout::inline_layout::flat_text_child_range(parent, child)
+        .map_or(0, |(start, _)| start);
+    hit.node_id = parent.node_id;
+    hit.local_offset += prefix;
+    hit
+}
+
 // ─── Recursive box hit test ───────────────────────────────────────────────────
 //
 // NOTE: In the Rust layout engine ALL coordinates (border_rect, content_rect,
@@ -358,11 +375,7 @@ pub(crate) fn to_local(node: &WebCore, pt: (f32, f32)) -> (f32, f32) {
     ((m[3] * x - m[2] * y) / det, (-m[1] * x + m[0] * y) / det)
 }
 
-fn child_hit_point(
-    child: &WebCore,
-    parent_pt: (f32, f32),
-    viewport_pt: (f32, f32),
-) -> (f32, f32) {
+fn child_hit_point(child: &WebCore, parent_pt: (f32, f32), viewport_pt: (f32, f32)) -> (f32, f32) {
     to_local(
         child,
         if child.style.position == Position::Fixed {
@@ -401,7 +414,8 @@ fn hit_test_impl(
     // block children (e.g. buttons) receive hits even when the parent has
     // inline text nodes. See fallback handling below.
 
-    let children_are_clipped = children_clipped_at(node, px, py);
+    // The scrollport stays in place; only descendant/text coordinates scroll.
+    let children_are_clipped = children_clipped_at(node, doc_pt.0, doc_pt.1);
     if !children_are_clipped {
         let mut z_descendants = Vec::new();
         for child in node.effective_children() {
@@ -427,7 +441,7 @@ fn hit_test_impl(
                 && child_pt.1 >= b.y
                 && child_pt.1 < b.y + b.h;
             if let Some(r) = hit_test_impl(child, child_pt, viewport_pt, _button) {
-                return Some(r);
+                return Some(resolve_anonymous_hit(node, child, r));
             }
             if in_border
                 && accepts_pointer_events(child)
@@ -459,7 +473,7 @@ fn hit_test_impl(
             // display:contents elements are transparent — recurse into their children directly
             if matches!(child.style.display, crate::types::Display::Contents) {
                 if let Some(r) = hit_test_impl(child, (px, py), viewport_pt, _button) {
-                    return Some(r);
+                    return Some(resolve_anonymous_hit(node, child, r));
                 }
                 continue;
             }
@@ -481,7 +495,7 @@ fn hit_test_impl(
             let in_border = cx >= b.x && cx < b.x + b.w && cy >= b.y && cy < b.y + b.h;
             if in_border || point_in_children_clip_area(child, cx, cy) {
                 if let Some(r) = hit_test_impl(child, (cx, cy), viewport_pt, _button) {
-                    return Some(r);
+                    return Some(resolve_anonymous_hit(node, child, r));
                 }
                 if in_border
                     && accepts_pointer_events(child)
@@ -518,7 +532,7 @@ fn hit_test_impl(
             let m = &child.layout.margin_rect;
             if cx >= m.x && cx < m.x + m.w && cy >= m.y && cy < m.y + m.h {
                 if let Some(r) = hit_test_impl(child, (cx, cy), viewport_pt, _button) {
-                    return Some(r);
+                    return Some(resolve_anonymous_hit(node, child, r));
                 }
             }
         }
@@ -546,7 +560,7 @@ fn hit_test_impl(
             let b = &child.layout.border_rect;
             if cx >= b.x && cx < b.x + b.w {
                 if let Some(r) = hit_test_impl(child, (cx, cy), viewport_pt, _button) {
-                    return Some(r);
+                    return Some(resolve_anonymous_hit(node, child, r));
                 }
             }
         }
@@ -554,7 +568,12 @@ fn hit_test_impl(
 
     // Fallback: If no children hit, but this node contains the point
     let b = &node.layout.border_rect;
-    if accepts_pointer_events(node) && px >= b.x && px < b.x + b.w && py >= b.y && py < b.y + b.h {
+    if accepts_pointer_events(node)
+        && doc_pt.0 >= b.x
+        && doc_pt.0 < b.x + b.w
+        && doc_pt.1 >= b.y
+        && doc_pt.1 < b.y + b.h
+    {
         // If this node has inline content, return the inline hit offset
         // (caret/text hit). Otherwise select the node itself.
         if !node.layout.line_cache.is_empty() {
@@ -703,7 +722,7 @@ fn collect_deferred_z_descendants_for_hit<'a>(
     }
     let px = pt.0 + node.layout.scroll_left;
     let py = pt.1 + node.layout.scroll_top;
-    if children_clipped_at(node, px, py) {
+    if children_clipped_at(node, pt.0, pt.1) {
         return;
     }
     for child in node.effective_children() {
@@ -737,9 +756,13 @@ fn point_in_children_clip_bounds(
     if px < left || px >= right || py < top || py >= bottom {
         return false;
     }
-    if !matches!(node.style.overflow_x, Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto)
-        || !matches!(node.style.overflow_y, Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto)
-    {
+    if !matches!(
+        node.style.overflow_x,
+        Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto
+    ) || !matches!(
+        node.style.overflow_y,
+        Overflow::Hidden | Overflow::Clip | Overflow::Scroll | Overflow::Auto
+    ) {
         return true;
     }
     if [
@@ -759,16 +782,18 @@ fn point_in_children_clip_bounds(
     }
     let root_font_px = crate::types::ComputedStyle::INITIAL_FONT_SIZE_PX;
     let font_px = node.style.font_size_px(root_font_px, root_font_px);
-    let (rx, ry) = crate::css::overflow_clip_radii(
-        &node.style,
-        &node.layout,
-        font_px,
-        root_font_px,
-    );
+    let (rx, ry) =
+        crate::css::overflow_clip_radii(&node.style, &node.layout, font_px, root_font_px);
     if rx.iter().all(|radius| *radius == 0.0) && ry.iter().all(|radius| *radius == 0.0) {
         return true;
     }
-    point_inside_rounded_clip_box(Rect::new(left, top, right - left, bottom - top), rx, ry, px, py)
+    point_inside_rounded_clip_box(
+        Rect::new(left, top, right - left, bottom - top),
+        rx,
+        ry,
+        px,
+        py,
+    )
 }
 
 fn children_clip_bounds(node: &WebCore) -> Option<(f32, f32, f32, f32)> {
@@ -785,34 +810,12 @@ fn children_clip_bounds(node: &WebCore) -> Option<(f32, f32, f32, f32)> {
     }
     let root_font_px = crate::types::ComputedStyle::INITIAL_FONT_SIZE_PX;
     let font_px = node.style.font_size_px(root_font_px, root_font_px);
-    let p = crate::css::overflow_clip_rect(
-        &node.style,
-        &node.layout,
-        0.0,
-        0.0,
-        font_px,
-        root_font_px,
-    );
-    let left = if clip_x {
-        p.x
-    } else {
-        f32::NEG_INFINITY
-    };
-    let right = if clip_x {
-        p.x + p.w
-    } else {
-        f32::INFINITY
-    };
-    let top = if clip_y {
-        p.y
-    } else {
-        f32::NEG_INFINITY
-    };
-    let bottom = if clip_y {
-        p.y + p.h
-    } else {
-        f32::INFINITY
-    };
+    let p =
+        crate::css::overflow_clip_rect(&node.style, &node.layout, 0.0, 0.0, font_px, root_font_px);
+    let left = if clip_x { p.x } else { f32::NEG_INFINITY };
+    let right = if clip_x { p.x + p.w } else { f32::INFINITY };
+    let top = if clip_y { p.y } else { f32::NEG_INFINITY };
+    let bottom = if clip_y { p.y + p.h } else { f32::INFINITY };
     Some((left, right, top, bottom))
 }
 
@@ -927,7 +930,9 @@ fn point_inside_clip_polygon(node: &WebCore, x: f32, y: f32, font_px: f32) -> bo
 
     let root_font_px = crate::types::ComputedStyle::INITIAL_FONT_SIZE_PX;
     let rounded = node.style.clip_path.polygon_round.as_ref().map(|_| {
-        node.style.clip_path.polygon_outline(b, font_px, root_font_px)
+        node.style
+            .clip_path
+            .polygon_outline(b, font_px, root_font_px)
     });
     let count = rounded.as_ref().map_or(points.len(), Vec::len);
     let coordinate = |index: usize| {
@@ -1170,7 +1175,7 @@ fn deepest_box_at(
         pt.0 + node.layout.scroll_left,
         pt.1 + node.layout.scroll_top,
     );
-    if children_clipped_at(node, px, py) {
+    if children_clipped_at(node, pt.0, pt.1) {
         return None;
     }
     let mut z_descendants = Vec::new();
@@ -1229,10 +1234,10 @@ fn deepest_box_at(
     }
     let b = &node.layout.border_rect;
     if accepts_pointer_events(node)
-        && px >= b.x
-        && px < b.x + b.w
-        && py >= b.y
-        && py < b.y + b.h
+        && pt.0 >= b.x
+        && pt.0 < b.x + b.w
+        && pt.1 >= b.y
+        && pt.1 < b.y + b.h
         && !node.layout.line_cache.is_empty()
     {
         if let Some((target, _)) = inline_hit_target(node, px, py) {

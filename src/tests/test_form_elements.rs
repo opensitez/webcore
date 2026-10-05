@@ -5,6 +5,515 @@ use crate::renderer::display_list_builder::build_display_list;
 use crate::types::*;
 use crate::{Document, Renderer, parse_html};
 
+#[test]
+fn modal_dialog_confines_focus_and_restores_opener_without_inert_attribute_mutation() {
+    let mut doc = parse_html(
+        "<button id=opener>Open</button><div inert id=ancestor><dialog id=modal><input id=disabled disabled autofocus><input id=first><button id=last>Last</button></dialog></div><input id=outside>",
+    );
+    let opener = doc.get_element_by_id("opener").unwrap();
+    let modal = doc.get_element_by_id("modal").unwrap();
+    let first = doc.get_element_by_id("first").unwrap();
+    let last = doc.get_element_by_id("last").unwrap();
+    let outside = doc.get_element_by_id("outside").unwrap();
+    doc.focus(opener);
+    doc.show_dialog(modal, true);
+    assert_eq!(doc.focused_box, first);
+    assert!(doc.is_inert(outside));
+    assert!(!doc.inert(outside));
+    assert!(!doc.is_inert(first), "modal escapes an inert ancestor");
+    doc.focus(outside);
+    assert_eq!(doc.focused_box, first);
+    doc.recascade();
+    assert!(doc.focus_next());
+    assert_eq!(doc.focused_box, last);
+    assert!(doc.focus_next());
+    assert_eq!(doc.focused_box, first);
+    doc.close_dialog(modal);
+    assert_eq!(doc.focused_box, opener);
+    assert!(!doc.is_inert(outside));
+    assert!(
+        doc.is_inert(first),
+        "ancestor inertness resumes after close"
+    );
+}
+
+#[test]
+fn modal_dialog_pointer_targets_top_layer_not_covered_background_link() {
+    let mut doc = layout_html(
+        "<dialog id=d><button id=inside type=button>Inside</button></dialog><a href='/wrong' style='position:fixed;inset:0;z-index:999999'>Covered link</a>",
+        600.0,
+    );
+    let dialog = doc.get_element_by_id("d").unwrap();
+    let inside = doc.get_element_by_id("inside").unwrap();
+    doc.show_dialog(dialog, true);
+    LayoutEngine::new().layout(&mut doc, 600.0);
+    let rect = doc.find_webcore(inside).unwrap().layout.border_rect;
+    let point = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+    let hit = doc.pointer_hit(point, 0).unwrap();
+    assert!(doc.is_descendant_of(hit.node_id, dialog));
+    assert!(doc.pointer_link(point, 0).is_none());
+    assert!(doc.pointer_hit((1.0, 1.0), 0).is_none());
+}
+
+#[test]
+fn modal_dialog_escape_honors_cancel_and_closedby() {
+    let mut doc = parse_html("<dialog id=d><input></dialog>");
+    let dialog = doc.get_element_by_id("d").unwrap();
+    doc.show_dialog(dialog, true);
+    let listener = doc.add_event_listener(
+        dialog,
+        "cancel",
+        Box::new(|event, _| event.prevent_default()),
+        crate::dom::events::ListenerOptions::default(),
+    );
+    doc.process_key_event(
+        crate::dom::HtmlEventType::KeyDown,
+        27,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    assert!(doc.dialog_open(dialog));
+    doc.remove_event_listener(listener);
+    doc.set_attribute(dialog, "closedby", "none");
+    doc.process_key_event(
+        crate::dom::HtmlEventType::KeyDown,
+        27,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    assert!(doc.dialog_open(dialog));
+    doc.remove_attribute(dialog, "closedby");
+    doc.process_key_event(
+        crate::dom::HtmlEventType::KeyDown,
+        27,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    assert!(!doc.dialog_open(dialog));
+}
+
+#[test]
+fn dialog_commands_and_form_submission_share_dialog_state() {
+    let mut doc = parse_html(
+        "<button id=open type=button commandfor=d command=show-modal>Open</button><dialog id=d><button id=close type=button commandfor=d command=request-close value=cancel>Cancel</button><form id=f method=dialog><button id=accept value=accepted>Accept</button></form></dialog>",
+    );
+    let opener = doc.get_element_by_id("open").unwrap();
+    let dialog = doc.get_element_by_id("d").unwrap();
+    let close = doc.get_element_by_id("close").unwrap();
+    doc.focus(opener);
+    assert!(doc.process_key_event(
+        crate::dom::HtmlEventType::KeyDown,
+        13,
+        None,
+        false,
+        false,
+        false,
+        false
+    ));
+    assert!(doc.dialog_open(dialog));
+    assert!(doc.activate_dialog_command(close));
+    assert!(!doc.dialog_open(dialog));
+    assert_eq!(doc.dialog_return_value(dialog), "cancel");
+    assert_eq!(doc.focused_box, opener);
+    doc.activate_dialog_command(opener);
+    let form = doc.get_element_by_id("f").unwrap();
+    let accept = doc.get_element_by_id("accept").unwrap();
+    doc.submit_dialog_form(form, accept);
+    assert!(!doc.dialog_open(dialog));
+    assert_eq!(doc.dialog_return_value(dialog), "accepted");
+}
+
+#[test]
+fn modal_dialog_repeated_show_does_not_replace_restore_target_or_promote_nonmodal() {
+    let mut doc = parse_html(
+        "<button id=o>Open</button><dialog id=d><input id=i></dialog><div id=bad></div>",
+    );
+    let opener = doc.get_element_by_id("o").unwrap();
+    let dialog = doc.get_element_by_id("d").unwrap();
+    let bad = doc.get_element_by_id("bad").unwrap();
+    doc.show_dialog(bad, true);
+    assert!(!doc.dialog_open(bad));
+    doc.focus(opener);
+    doc.show_dialog(dialog, true);
+    doc.show_dialog(dialog, true);
+    doc.close_dialog(dialog);
+    assert_eq!(doc.focused_box, opener);
+    doc.show_dialog(dialog, false);
+    doc.show_dialog(dialog, true);
+    assert!(doc.active_modal_dialog().is_none());
+}
+
+#[test]
+fn temporal_numbers_use_html_epochs_and_iso_week_boundaries() {
+    for (kind, value, expected) in [
+        ("date", "1970-01-01", 0.0),
+        ("date", "1969-12-31", -86_400_000.0),
+        ("date", "2000-03-01", 951_868_800_000.0),
+        ("month", "1969-12", -1.0),
+        ("month", "1970-02", 1.0),
+        ("week", "1970-W01", -259_200_000.0),
+        ("week", "2020-W53", 1_609_113_600_000.0),
+        ("time", "23:59:59.123", 86_399_123.0),
+        ("datetime-local", "1970-01-01T00:00:00.125", 125.0),
+    ] {
+        assert_eq!(
+            crate::html::temporal::value_number(kind, value),
+            Some(expected),
+            "{kind} {value}"
+        );
+    }
+}
+
+#[test]
+fn temporal_constraints_share_grammar_step_units_and_periodic_time_ranges() {
+    for (kind, attrs, value, under, over, step) in [
+        (
+            "date",
+            "min='2026-10-05' max='2026-10-09'",
+            "2026-10-04",
+            true,
+            false,
+            false,
+        ),
+        (
+            "date",
+            "min='2026-10-05' max='2026-10-09'",
+            "2026-10-10",
+            false,
+            true,
+            false,
+        ),
+        (
+            "date",
+            "min='2026-10-05' step='2'",
+            "2026-10-06",
+            false,
+            false,
+            true,
+        ),
+        (
+            "date",
+            "value='2026-10-05' step='2'",
+            "2026-10-07",
+            false,
+            false,
+            false,
+        ),
+        (
+            "date",
+            "value='2026-10-05' step='2'",
+            "2026-10-06",
+            false,
+            false,
+            true,
+        ),
+        (
+            "date",
+            "min='2026-02-31' max='garbage'",
+            "2026-10-05",
+            false,
+            false,
+            false,
+        ),
+        (
+            "month",
+            "min='2026-01' step='3'",
+            "2026-05",
+            false,
+            false,
+            true,
+        ),
+        (
+            "month",
+            "min='2026-01' step='3'",
+            "2026-07",
+            false,
+            false,
+            false,
+        ),
+        ("week", "", "1970-W01", false, false, false),
+        ("week", "step='2'", "1970-W02", false, false, true),
+        ("week", "min='2020-W53'", "2021-W01", false, false, false),
+        ("time", "", "12:30:01", false, false, true),
+        ("time", "step='0.125'", "12:30:00.125", false, false, false),
+        ("time", "step='0.125'", "12:30:00.126", false, false, true),
+        ("time", "step='ANY'", "12:30:00.126", false, false, false),
+        ("time", "step='0'", "12:30:01", false, false, true),
+        ("time", "value='12:30:01'", "12:31:01", false, false, false),
+        (
+            "time",
+            "min='21:00' max='06:00'",
+            "23:00",
+            false,
+            false,
+            false,
+        ),
+        (
+            "time",
+            "min='21:00' max='06:00'",
+            "00:00",
+            false,
+            false,
+            false,
+        ),
+        (
+            "time",
+            "min='21:00' max='06:00'",
+            "12:00",
+            true,
+            true,
+            false,
+        ),
+        (
+            "time",
+            "min='21:00' max='06:00'",
+            "06:00",
+            false,
+            false,
+            false,
+        ),
+        (
+            "datetime-local",
+            "min='2026-10-05T12:30' step='90'",
+            "2026-10-05T12:31:30",
+            false,
+            false,
+            false,
+        ),
+        (
+            "datetime-local",
+            "min='2026-10-05T12:30' step='90'",
+            "2026-10-05T12:31",
+            false,
+            false,
+            true,
+        ),
+        (
+            "datetime-local",
+            "max='2026-10-05T12:30'",
+            "2026-10-05T12:31",
+            false,
+            true,
+            false,
+        ),
+    ] {
+        let mut doc = parse_html(&format!("<input id=i type='{kind}' {attrs}>"));
+        let id = doc.get_element_by_id("i").unwrap();
+        doc.set_value(id, value);
+        let validity = doc.validity(id);
+        assert_eq!(
+            (
+                validity.range_underflow,
+                validity.range_overflow,
+                validity.step_mismatch
+            ),
+            (under, over, step),
+            "{kind} {attrs} value={value}"
+        );
+        doc.set_attribute(id, "disabled", "");
+        assert!(doc.validity(id).valid());
+    }
+}
+
+#[test]
+fn temporal_validation_selectors_follow_live_constraints_not_step_validity_for_range() {
+    let mut doc = parse_html("<input id=i type=time min='09:00' max='17:00' step=120>");
+    let id = doc.get_element_by_id("i").unwrap();
+    doc.set_value(id, "09:01");
+    assert!(doc.validity(id).step_mismatch);
+    assert!(crate::dom::query_selector(&doc.root, "#i:invalid").is_some());
+    assert!(crate::dom::query_selector(&doc.root, "#i:in-range").is_some());
+    assert!(crate::dom::query_selector(&doc.root, "#i:out-of-range").is_none());
+    doc.set_value(id, "08:00");
+    assert!(crate::dom::query_selector(&doc.root, "#i:out-of-range").is_some());
+    doc.set_attribute(id, "readonly", "");
+    assert!(doc.validity(id).valid());
+    assert!(crate::dom::query_selector(&doc.root, "#i:invalid").is_none());
+    doc.remove_attribute(id, "readonly");
+    doc.set_attribute(id, "min", "21:00");
+    doc.set_attribute(id, "max", "06:00");
+    doc.set_value(id, "00:00");
+    assert!(crate::dom::query_selector(&doc.root, "#i:valid").is_some());
+    assert!(crate::dom::query_selector(&doc.root, "#i:in-range").is_some());
+}
+
+#[test]
+fn temporal_inputs_sanitize_markup_assignment_and_reset_with_one_grammar() {
+    for (kind, raw, expected) in [
+        ("date", "2000-02-29", "2000-02-29"),
+        ("date", "1900-02-29", ""),
+        ("date", "2026-04-31", ""),
+        ("date", "2026-02-31-extra", ""),
+        ("date", " 2026-10-05", ""),
+        ("date", "0000-01-01", ""),
+        (
+            "date",
+            "9999999999999999999999-01-01",
+            "9999999999999999999999-01-01",
+        ),
+        ("month", "2026-10", "2026-10"),
+        ("month", "2026-1", ""),
+        ("month", "2026-13", ""),
+        ("week", "2020-W53", "2020-W53"),
+        ("week", "2025-W53", ""),
+        ("week", "2026-W53", "2026-W53"),
+        ("week", "2026-w40", ""),
+        ("week", "2026-W00", ""),
+        ("time", "23:59:59.123", "23:59:59.123"),
+        ("time", "24:00", ""),
+        ("time", "12:30:60", ""),
+        ("time", "12:30:00.1234", ""),
+        ("time", "12:30:00.", ""),
+        (
+            "datetime-local",
+            "2026-10-05 12:30:00.000",
+            "2026-10-05T12:30",
+        ),
+        (
+            "datetime-local",
+            "2026-10-05T12:30:01.120",
+            "2026-10-05T12:30:01.12",
+        ),
+        ("datetime-local", "2026-10-05T12:30Z", ""),
+        ("datetime-local", "2026-10-05T12:30+01:00", ""),
+    ] {
+        let mut doc = parse_html(&format!(
+            "<form id='f'><input id='i' type='{kind}' value='{raw}'></form>"
+        ));
+        let id = doc.get_element_by_id("i").unwrap();
+        let form = doc.get_element_by_id("f").unwrap();
+        assert_eq!(doc.value(id), expected, "markup {kind}: {raw}");
+        assert_eq!(doc.get_attribute(id, "value").as_deref(), Some(raw));
+        doc.set_value(id, raw);
+        assert_eq!(doc.value(id), expected, "assignment {kind}: {raw}");
+        crate::types::reset_form(&mut doc.root, form);
+        assert_eq!(doc.value(id), expected, "reset {kind}: {raw}");
+        assert!(!doc.get_node(id).unwrap().dirty_value);
+    }
+}
+
+#[test]
+fn temporal_default_and_type_mutations_respect_live_value_state() {
+    let mut doc = parse_html("<input id='i' type='date' value='2026-10-05'>");
+    let id = doc.get_element_by_id("i").unwrap();
+    doc.set_attribute(id, "value", "2026-02-31");
+    assert_eq!(doc.value(id), "");
+    doc.set_attribute(id, "value", "2026-10-06");
+    assert_eq!(doc.value(id), "2026-10-06");
+    doc.remove_attribute(id, "value");
+    assert_eq!(doc.value(id), "");
+    doc.set_value(id, "2026-10-07");
+    doc.set_attribute(id, "value", "2026-10-08");
+    doc.remove_attribute(id, "value");
+    assert_eq!(
+        doc.value(id),
+        "2026-10-07",
+        "dirty live value is independent of its default"
+    );
+    doc.set_attribute(id, "type", "month");
+    assert_eq!(
+        doc.value(id),
+        "",
+        "type changes invoke the new sanitization algorithm"
+    );
+}
+
+#[test]
+fn progress_normalization_uses_html_numbers_and_ignores_min() {
+    use crate::html::forms::progress_state;
+    let state = |attrs: &[(&str, &str)]| {
+        progress_state(|name| {
+            attrs
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| *value)
+        })
+    };
+    assert_eq!(state(&[]).position(), -1.0);
+    for max in ["0", "-5", "NaN", "Infinity", "1e999", "bad"] {
+        let result = state(&[("max", max), ("value", "0.5"), ("min", "100")]);
+        assert_eq!(result.max, 1.0);
+        assert_eq!(result.position(), 0.5);
+    }
+    assert_eq!(
+        state(&[("max", " 10 units"), ("value", "3 done")]).position(),
+        0.3
+    );
+    assert_eq!(state(&[("max", "2"), ("value", "100")]).value, 2.0);
+    assert_eq!(state(&[("value", "NaN")]).position(), 0.0);
+    assert_eq!(state(&[("value", "-1")]).position(), 0.0);
+}
+
+#[test]
+fn gauge_dom_state_tracks_live_attribute_mutations() {
+    let mut doc =
+        parse_html("<progress id='p'></progress><meter id='m' min='10' max='20'></meter>");
+    let p = doc.get_element_by_id("p").unwrap();
+    let m = doc.get_element_by_id("m").unwrap();
+    assert_eq!(doc.progress_position(p), Some(-1.0));
+    doc.set_attribute(p, "value", "3 done");
+    doc.set_attribute(p, "max", "10");
+    assert_eq!(doc.progress_position(p), Some(0.3));
+    doc.remove_attribute(p, "value");
+    assert_eq!(doc.progress_position(p), Some(-1.0));
+    assert_eq!(doc.meter_state(m).unwrap().value, 10.0);
+    doc.set_attribute(m, "value", "18");
+    assert_eq!(doc.meter_state(m).unwrap().fraction(), 0.8);
+    assert!(doc.progress_state(m).is_none());
+    assert!(doc.meter_state(p).is_none());
+}
+
+#[test]
+fn meter_normalizes_ordered_boundaries_and_optimum_regions() {
+    use crate::html::forms::meter_state;
+    use crate::widgets::progress::{Band, meter_band_f64};
+    let attrs = [
+        ("min", "10"),
+        ("max", "20"),
+        ("low", "30"),
+        ("high", "-1"),
+        ("value", "NaN"),
+        ("optimum", "100"),
+    ];
+    let state = meter_state(|name| attrs.iter().find(|(key, _)| *key == name).map(|(_, v)| *v));
+    assert_eq!(
+        (
+            state.min,
+            state.max,
+            state.value,
+            state.low,
+            state.high,
+            state.optimum
+        ),
+        (10.0, 20.0, 10.0, 20.0, 20.0, 20.0)
+    );
+    for (optimum, expected) in [
+        (10.0, [Band::Optimum, Band::Suboptimal, Band::Bad]),
+        (50.0, [Band::Suboptimal, Band::Optimum, Band::Suboptimal]),
+        (90.0, [Band::Bad, Band::Suboptimal, Band::Optimum]),
+    ] {
+        for (value, band) in [10.0, 50.0, 90.0].into_iter().zip(expected) {
+            assert_eq!(meter_band_f64(value, 0.0, 100.0, 20.0, 80.0, optimum), band);
+        }
+    }
+    let huge = meter_state(|name| match name {
+        "min" => Some("-1e308"),
+        "max" => Some("1e308"),
+        _ => None,
+    });
+    assert_eq!(huge.optimum, 0.0);
+    assert_eq!(huge.fraction(), 0.5);
+}
+
 fn layout_html(html: &str, width: f32) -> Document {
     let mut doc = parse_html(html);
     apply_cascade_vp(
@@ -78,6 +587,47 @@ fn collect_text(node: &WebCore, out: &mut String) {
 }
 
 // ── Text Input Tests ─────────────────────────────────────────────────────────
+
+#[test]
+fn control_ua_box_sizing_depends_on_document_mode() {
+    for (doctype, expected) in [
+        ("<!doctype html>", BoxSizing::ContentBox),
+        ("", BoxSizing::BorderBox),
+    ] {
+        let doc = layout_html(
+            &format!(
+                "{doctype}<input id=text><input id=search type=SEARCH><textarea id=area></textarea>"
+            ),
+            600.0,
+        );
+        assert_eq!(
+            find_by_id(&doc.root, "text").unwrap().style.box_sizing,
+            expected
+        );
+        assert_eq!(
+            find_by_id(&doc.root, "area").unwrap().style.box_sizing,
+            expected
+        );
+        assert_eq!(
+            find_by_id(&doc.root, "search").unwrap().style.box_sizing,
+            BoxSizing::BorderBox
+        );
+    }
+}
+
+#[test]
+fn single_line_control_used_height_preserves_normal_font_minimum() {
+    let doc = layout_html(
+        "<!doctype html><input id=normal style='font-size:20px'><input id=short style='font-size:20px;line-height:1px'><input id=tall style='font-size:20px;line-height:40px'>",
+        600.0,
+    );
+    let normal = find_by_id(&doc.root, "normal").unwrap();
+    let short = find_by_id(&doc.root, "short").unwrap();
+    let tall = find_by_id(&doc.root, "tall").unwrap();
+    assert!((short.layout.content_rect.h - normal.layout.content_rect.h).abs() < 0.01);
+    assert!((tall.layout.content_rect.h - 40.0).abs() < 0.01);
+    assert_eq!(short.style.line_height, CssLength::Px(1.0));
+}
 
 #[test]
 fn text_input_has_correct_display() {
@@ -252,11 +802,15 @@ fn text_input_box_sizing_border_box() {
 
 #[test]
 fn text_input_text_centered_vertically() {
-    // The content height should leave room above and below the text line
-    let doc = layout_html(r#"<input type="text" value="Hello">"#, 400.0);
+    // An explicitly tall control leaves space above and below its normal line.
+    let doc = layout_html(
+        r#"<input type="text" value="Hello" style="height:60px">"#,
+        400.0,
+    );
     let input = find_by_tag(&doc.root, "input").unwrap();
     let font_px = input.style.font_size_px(16.0, 16.0);
-    let line_h = font_px * 1.2;
+    let (_, _, line_h) =
+        crate::layout::inline_layout::font_metrics(None, &input.style.font_family, font_px);
     let top_space = (input.layout.content_rect.h - line_h) / 2.0;
     assert!(
         top_space > 1.0,
@@ -1415,6 +1969,94 @@ fn label_for_attribute_preserved() {
 // ── Textarea rows/cols ──────────────────────────────────────────────────────
 
 #[test]
+fn textarea_character_dimensions_use_html_defaults_and_integer_parsing() {
+    let doc = layout_html(
+        "<!doctype html><textarea id=default></textarea><textarea id=explicit rows=2 cols=20></textarea><textarea id=zero rows=0 cols=0></textarea><textarea id=invalid rows=-2 cols=bad></textarea><textarea id=parsed rows='4 lines' cols='30 characters'></textarea>",
+        1200.0,
+    );
+    let normal = find_by_id(&doc.root, "default").unwrap();
+    for id in ["explicit", "zero", "invalid"] {
+        let node = find_by_id(&doc.root, id).unwrap();
+        assert_eq!(node.layout.content_rect.w, normal.layout.content_rect.w);
+        assert_eq!(node.layout.content_rect.h, normal.layout.content_rect.h);
+    }
+    let parsed = find_by_id(&doc.root, "parsed").unwrap();
+    let scrollbar = normal.style.scrollbar_width_px();
+    assert!(
+        (parsed.layout.content_rect.w
+            - scrollbar
+            - (normal.layout.content_rect.w - scrollbar) * 1.5)
+            .abs()
+            < 0.01
+    );
+    assert!(
+        (parsed.layout.content_rect.h
+            - scrollbar
+            - (normal.layout.content_rect.h - scrollbar) * 2.0)
+            .abs()
+            < 0.01
+    );
+    assert!(parsed.style.width.is_auto());
+    assert!(parsed.style.height.is_auto());
+}
+
+#[test]
+fn textarea_intrinsic_height_uses_author_line_height_and_scrollbar_metrics() {
+    let doc = layout_html(
+        "<!doctype html><textarea id=a rows=3 style='line-height:21px;scrollbar-width:none'></textarea><textarea id=b rows=3 style='line-height:21px;scrollbar-width:thin'></textarea>",
+        900.0,
+    );
+    let a = find_by_id(&doc.root, "a").unwrap();
+    let b = find_by_id(&doc.root, "b").unwrap();
+    assert_eq!(a.layout.content_rect.h, 63.0);
+    assert_eq!(
+        b.layout.content_rect.h - a.layout.content_rect.h,
+        b.style.scrollbar_width_px()
+    );
+    assert_eq!(
+        b.layout.content_rect.w - a.layout.content_rect.w,
+        b.style.scrollbar_width_px()
+    );
+}
+
+#[test]
+fn content_sized_textarea_measures_widest_line_and_keeps_final_empty_line() {
+    let doc = layout_html(
+        "<!doctype html><style>textarea{field-sizing:content;line-height:21px}</style><textarea id=wide>WWWW</textarea><textarea id=mixed rows=90 cols=90>WWWW\niiiiiiii\n</textarea>",
+        900.0,
+    );
+    let wide = find_by_id(&doc.root, "wide").unwrap();
+    let mixed = find_by_id(&doc.root, "mixed").unwrap();
+    assert_eq!(wide.layout.content_rect.w, mixed.layout.content_rect.w);
+    assert_eq!(mixed.layout.content_rect.h, 63.0);
+}
+
+#[test]
+fn multiple_list_box_fits_its_display_size_and_modifier_toggles_each_row() {
+    let mut doc = layout_html(
+        "<!doctype html><select id=s multiple size=4 style='padding:8px;border:2px solid blue'><option selected>A</option><option disabled>B</option><option>C</option><option selected>D</option></select>",
+        600.0,
+    );
+    let id = doc.get_element_by_id("s").unwrap();
+    let node = doc.get_node(id).unwrap();
+    let rect = node.layout.content_rect;
+    let font_px = node.style.font_size_px(16.0, 16.0);
+    let row_h = crate::html::forms::list_box_row_height(font_px);
+    assert!(rect.h >= row_h * 4.0 + 2.0 * crate::html::forms::LIST_BOX_PADDING);
+    let ids = crate::html::forms::option_ids(node);
+    let row_y =
+        |index| rect.y + crate::html::forms::LIST_BOX_PADDING + row_h * (index as f32 + 0.5);
+    assert!(doc.click_list_box_row(id, row_y(3), true, false));
+    assert!(!doc.get_node(ids[3]).unwrap().selectedness);
+    assert!(doc.get_node(ids[0]).unwrap().selectedness);
+    assert!(!doc.click_list_box_row(id, row_y(1), true, false));
+    assert!(doc.click_list_box_row(id, row_y(2), true, false));
+    assert!(doc.get_node(ids[2]).unwrap().selectedness);
+    assert!(doc.click_list_box_row(id, row_y(3), true, false));
+    assert!(doc.get_node(ids[3]).unwrap().selectedness);
+}
+
+#[test]
 fn textarea_rows_affects_height() {
     let doc1 = layout_html(r#"<textarea rows="2">text</textarea>"#, 400.0);
     let doc2 = layout_html(r#"<textarea rows="6">text</textarea>"#, 400.0);
@@ -1428,7 +2070,147 @@ fn textarea_rows_affects_height() {
     );
 }
 
+#[test]
+fn multiple_list_box_shift_extends_from_anchor_and_skips_disabled_options() {
+    let mut doc = layout_html(
+        "<select id=s multiple size=5><option>A</option><optgroup disabled><option>B</option></optgroup><option>C</option><option>D</option><option>E</option></select>",
+        600.0,
+    );
+    let id = doc.get_element_by_id("s").unwrap();
+    let select = doc.get_node(id).unwrap();
+    let ids = crate::html::forms::option_ids(select);
+    let rect = select.layout.content_rect;
+    let row_h = crate::html::forms::list_box_row_height(select.style.font_size_px(16.0, 16.0));
+    let y = |row| rect.y + crate::html::forms::LIST_BOX_PADDING + row_h * (row as f32 + 0.5);
+    assert!(doc.click_list_box_row(id, y(0), false, false));
+    assert!(doc.click_list_box_row(id, y(3), false, true));
+    assert_eq!(
+        ids.iter()
+            .map(|&id| doc.get_node(id).unwrap().selectedness)
+            .collect::<Vec<_>>(),
+        [true, false, true, true, false]
+    );
+    assert!(doc.click_list_box_row(id, y(2), false, true));
+    assert_eq!(
+        ids.iter()
+            .map(|&id| doc.get_node(id).unwrap().selectedness)
+            .collect::<Vec<_>>(),
+        [true, false, true, false, false]
+    );
+    assert!(doc.click_list_box_row(id, y(4), true, false));
+    assert!(doc.click_list_box_row(id, y(4), false, false));
+    assert_eq!(
+        ids.iter()
+            .map(|&id| doc.get_node(id).unwrap().selectedness)
+            .collect::<Vec<_>>(),
+        [false, false, false, false, true]
+    );
+}
+
+#[test]
+fn checked_selector_tracks_live_option_selection_not_reset_attributes() {
+    let mut doc = layout_html(
+        "<select id=s multiple size=3><option id=a selected>A</option><option id=b>B</option><option id=c selected>C</option></select>",
+        600.0,
+    );
+    let id = doc.get_element_by_id("s").unwrap();
+    let rect = doc.get_node(id).unwrap().layout.content_rect;
+    let row_h = crate::html::forms::list_box_row_height(
+        doc.get_node(id).unwrap().style.font_size_px(16.0, 16.0),
+    );
+    assert!(doc.click_list_box_row(
+        id,
+        rect.y + crate::html::forms::LIST_BOX_PADDING + row_h * 1.5,
+        false,
+        false
+    ));
+    assert_eq!(
+        doc.query_selector_all("option:checked"),
+        [doc.get_element_by_id("b").unwrap()]
+    );
+    assert!(doc.query_selector_all("#a:checked + #b").is_empty());
+    assert_eq!(
+        doc.query_selector_all("#b:checked + #c"),
+        [doc.get_element_by_id("c").unwrap()]
+    );
+    assert!(doc.has_attribute(doc.get_element_by_id("a").unwrap(), "selected"));
+    assert!(doc.has_attribute(doc.get_element_by_id("c").unwrap(), "selected"));
+}
+
+#[test]
+fn option_style_cache_key_distinguishes_live_selectedness() {
+    let mut node = WebCore::new("option");
+    let before = node.selector_state_key(0);
+    node.selectedness = true;
+    assert_ne!(before, node.selector_state_key(0));
+    assert!(!node.attributes.contains_key("selected"));
+}
+
+#[test]
+fn native_listbox_and_textarea_overflow_use_element_scroll_extent() {
+    let mut doc = layout_html(
+        "<select id=s size=2><option>A</option><option>B</option><option>C</option><option>D</option></select><textarea id=t rows=2>A\nB\nC\nD\nE</textarea>",
+        600.0,
+    );
+    for name in ["s", "t"] {
+        let id = doc.get_element_by_id(name).unwrap();
+        let node = doc.get_node(id).unwrap();
+        let rect = node.layout.content_rect;
+        assert_eq!(node.style.overflow_y, crate::types::Overflow::Auto);
+        assert!(
+            node.layout.scroll_height > rect.h,
+            "{name} must expose native content overflow"
+        );
+        assert!(doc.process_wheel_event((rect.x + 5.0, rect.y + 5.0), -30.0));
+        let scroll = doc.get_node(id).unwrap().layout.scroll_top;
+        assert!(scroll > 0.0, "wheel must scroll {name}, not just the page");
+        crate::layout::LayoutEngine::new().layout(&mut doc, 600.0);
+        assert_eq!(
+            doc.get_node(id).unwrap().layout.scroll_top,
+            scroll,
+            "a layout must retain the control's scroll position"
+        );
+    }
+}
+
 // ── Input size attribute ────────────────────────────────────────────────────
+
+#[test]
+fn input_character_width_uses_integer_size_and_ignores_letter_spacing() {
+    let doc = layout_html(
+        "<!doctype html><input id=default><input id=twenty size=20><input id=spaced size='20 characters' style='letter-spacing:10px'><input id=invalid size=-3><input id=zero size=0>",
+        1200.0,
+    );
+    let width = |id| find_by_id(&doc.root, id).unwrap().layout.content_rect.w;
+    assert_eq!(width("default"), width("twenty"));
+    assert_eq!(width("spaced"), width("twenty"));
+    assert_eq!(width("invalid"), width("twenty"));
+    assert!(width("zero") < width("twenty"));
+}
+
+#[test]
+fn input_intrinsic_width_scales_with_font_metrics_in_normal_layout() {
+    let mut fonts = cosmic_text::FontSystem::new();
+    let mut doc = parse_html(
+        "<!doctype html><input id=small size=10 style='font-size:12px;font-family:monospace'><input id=large size=10 style='font-size:24px;font-family:monospace'>",
+    );
+    let mut engine = LayoutEngine::new();
+    engine.font_system = Some(&mut fonts);
+    engine.layout(&mut doc, 1200.0);
+    let small = find_by_id(&doc.root, "small").unwrap();
+    let large = find_by_id(&doc.root, "large").unwrap();
+    let (average, maximum) = crate::layout::inline_layout::control_character_widths(
+        &mut fonts,
+        &small.style.font_family,
+        12.0,
+        small.style.font_weight,
+        small.style.font_style,
+        small.style.font_stretch,
+    )
+    .unwrap();
+    assert!((small.layout.content_rect.w - (9.0 * average + maximum)).abs() < 0.01);
+    assert!((large.layout.content_rect.w - small.layout.content_rect.w * 2.0).abs() < 0.01);
+}
 
 #[test]
 fn input_size_affects_width() {
@@ -2278,6 +3060,71 @@ fn click_sets_focus(html: &str, tag: &str) -> bool {
 }
 
 #[test]
+fn disabled_controls_reject_pointer_programmatic_and_tab_focus() {
+    for (tag, markup) in [
+        ("input", "<input disabled tabindex=0>"),
+        ("input", "<input type=checkbox disabled tabindex=0>"),
+        ("input", "<input type=range disabled tabindex=0>"),
+        ("input", "<input type=date disabled tabindex=0>"),
+        ("input", "<input type=file disabled tabindex=0>"),
+        ("textarea", "<textarea disabled tabindex=0></textarea>"),
+        (
+            "select",
+            "<select disabled tabindex=0><option>A</option></select>",
+        ),
+        ("button", "<button disabled tabindex=0>Button</button>"),
+    ] {
+        assert!(
+            !click_sets_focus(markup, tag),
+            "disabled pointer focus: {markup}"
+        );
+        let mut doc = layout_html(markup, 400.0);
+        let id = find_by_tag(&doc.root, tag).unwrap().node_id;
+        doc.focus(id);
+        assert_eq!(doc.focused_box, 0, "disabled programmatic focus: {markup}");
+        assert!(!doc.focus_next(), "disabled tab focus: {markup}");
+    }
+}
+
+#[test]
+fn disabled_fieldset_blocks_focus_and_mutation_but_preserves_legend_exception() {
+    let mut doc = layout_html(
+        "<fieldset disabled><legend><input id=legend value=allowed></legend><input id=text value=blocked><input id=number type=number value=2><input id=range type=range value=50><select id=select size=4><option>A</option><option>B</option></select><a id=link href='/'>Link</a></fieldset>",
+        600.0,
+    );
+    for name in ["text", "number", "range", "select"] {
+        let id = doc.get_element_by_id(name).unwrap();
+        doc.focus(id);
+        assert_eq!(doc.focused_box, 0, "fieldset focus: {name}");
+    }
+    let number = doc.get_element_by_id("number").unwrap();
+    assert!(!doc.step_number_input(number, true));
+    let range = doc.get_element_by_id("range").unwrap();
+    let rect = doc.get_node(range).unwrap().layout.content_rect;
+    assert!(!doc.drag_range_to(range, (rect.right(), rect.y)));
+    let select = doc.get_element_by_id("select").unwrap();
+    let rect = doc.get_node(select).unwrap().layout.content_rect;
+    assert!(!doc.click_list_box_row(select, rect.y + 5.0, false, false));
+    let text = doc.get_element_by_id("text").unwrap();
+    doc.focused_box = text; // Becoming disabled can leave a queued key event.
+    doc.process_key_event(
+        crate::dom::HtmlEventType::KeyDown,
+        65,
+        Some('a'),
+        false,
+        false,
+        false,
+        false,
+    );
+    assert_eq!(doc.value(text), "blocked");
+    doc.focused_box = 0;
+    assert!(doc.focus_next());
+    assert_eq!(doc.focused_box, doc.get_element_by_id("legend").unwrap());
+    assert!(doc.focus_next());
+    assert_eq!(doc.focused_box, doc.get_element_by_id("link").unwrap());
+}
+
+#[test]
 fn click_focuses_text_input() {
     assert!(click_sets_focus(r#"<input type="text">"#, "input"));
 }
@@ -2575,6 +3422,85 @@ fn collect_form_data_basic() {
 }
 
 #[test]
+fn activated_image_submitter_contributes_coordinates_not_value() {
+    for name in ["map", ""] {
+        let doc = crate::parse_html(&format!(
+            "<form id=f><input name=before value=A><input id=go type=image name='{name}' value=ignored><input name=after value=B></form><input id=external type=image name=outside form=f>"
+        ));
+        let form = doc.get_element_by_id("f").unwrap();
+        let go = doc.get_element_by_id("go").unwrap();
+        let external = doc.get_element_by_id("external").unwrap();
+        let prefix = if name.is_empty() {
+            String::new()
+        } else {
+            format!("{name}.")
+        };
+        assert_eq!(
+            crate::types::collect_form_data_with_submitter(
+                &doc.root,
+                form,
+                Some(crate::types::FormSubmitter {
+                    node_id: go,
+                    image_coordinates: (12, 7),
+                })
+            ),
+            vec![
+                ("before".into(), "A".into()),
+                (format!("{prefix}x"), "12".into()),
+                (format!("{prefix}y"), "7".into()),
+                ("after".into(), "B".into()),
+            ]
+        );
+        let external_data = crate::types::collect_form_data_with_submitter(
+            &doc.root,
+            form,
+            Some(crate::types::FormSubmitter {
+                node_id: external,
+                image_coordinates: (0, 0),
+            }),
+        );
+        assert!(external_data.contains(&("outside.x".into(), "0".into())));
+        assert!(!external_data.iter().any(|(key, _)| key == "map.x"));
+        assert_eq!(
+            crate::types::collect_form_data_for_form(&doc.root, form),
+            vec![("before".into(), "A".into()), ("after".into(), "B".into())]
+        );
+    }
+}
+
+#[test]
+fn activated_submitter_value_excludes_other_buttons_and_disabled_controls() {
+    let doc = crate::parse_html(
+        "<form id=f><input name=a value=1><button id=go name=action value=save>Save</button><input type=submit name=other value=other><input id=no type=image name=no disabled></form>",
+    );
+    let form = doc.get_element_by_id("f").unwrap();
+    let go = doc.get_element_by_id("go").unwrap();
+    let no = doc.get_element_by_id("no").unwrap();
+    assert_eq!(
+        crate::types::collect_form_data_with_submitter(
+            &doc.root,
+            form,
+            Some(crate::types::FormSubmitter {
+                node_id: go,
+                image_coordinates: (0, 0),
+            })
+        ),
+        vec![("a".into(), "1".into()), ("action".into(), "save".into())]
+    );
+    assert_eq!(
+        crate::types::collect_form_data_with_submitter(
+            &doc.root,
+            form,
+            Some(crate::types::FormSubmitter {
+                node_id: no,
+                image_coordinates: (10, 10),
+            })
+        ),
+        vec![("a".into(), "1".into())]
+    );
+}
+
+#[test]
 fn collect_form_data_checkbox() {
     let doc = layout_html(
         r#"<form id="f">
@@ -2686,6 +3612,21 @@ fn collect_form_data_for_form_includes_form_attribute_controls() {
     assert_eq!(submitted_one(&data, "outside"), Some("yes"));
     assert_eq!(submitted_one(&data, "inside"), Some("ok"));
     assert!(submitted_one(&data, "wrong").is_none());
+    assert_eq!(
+        crate::types::encode_form_urlencoded(&data),
+        "outside=yes&inside=ok"
+    );
+}
+
+#[test]
+fn form_submission_excludes_controls_owned_by_another_or_missing_form() {
+    let doc = layout_html(
+        "<form id=f><input name=owned value=yes><input name=missing form=missing value=no><input name=other form=other value=no></form><form id=other></form>",
+        400.0,
+    );
+    let form = doc.get_element_by_id("f").unwrap();
+    let data = crate::types::collect_form_data_for_form(&doc.root, form);
+    assert_eq!(crate::types::encode_form_urlencoded(&data), "owned=yes");
 }
 
 #[test]
@@ -3252,6 +4193,7 @@ fn focused_placeholder_opacity_replaces_unfocused_opacity() {
     };
     assert_eq!(opacity(&doc), 0.0);
     assert!(doc.focus_next());
+    doc.update_computed_style(&mut crate::layout::LayoutEngine::new());
     assert_eq!(opacity(&doc), 1.0);
 }
 
@@ -3394,6 +4336,166 @@ fn select_multiple_attribute_preserved() {
     assert!(sel.attributes.contains_key("multiple"));
 }
 
+#[test]
+fn select_keyboard_skips_disabled_options_and_supports_home_end() {
+    let mut doc = layout_html(
+        r#"<select id="s"><option selected>A</option><option disabled>B</option>
+        <optgroup disabled><option>C</option></optgroup><option>D</option>
+        <option disabled>E</option></select>"#,
+        400.0,
+    );
+    let id = find_by_id(&doc.root, "s").unwrap().node_id;
+    doc.focused_box = id;
+    for (key, expected) in [(40, 3), (40, 3), (38, 0), (35, 3), (36, 0)] {
+        doc.process_key_event(
+            crate::dom::HtmlEventType::KeyDown,
+            key,
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(doc.selected_index(id), expected, "key {key}");
+    }
+}
+
+#[test]
+fn select_popup_fits_viewport_scrolls_and_blocks_covered_page() {
+    let options: String = (0..30).map(|i| format!("<option>{i}</option>")).collect();
+    let mut doc = layout_html(
+        &format!(
+            "<style>body{{margin:0}}select{{position:absolute;left:240px;top:160px;width:80px;height:25px}}\
+         button{{position:absolute;left:150px;top:40px;width:150px;height:100px}}</style>\
+         <button id='covered'>Covered</button><select id='s'>{options}</select>"
+        ),
+        320.0,
+    );
+    doc.viewport_w = 320.0;
+    doc.viewport_h = 200.0;
+    let id = doc.get_element_by_id("s").unwrap();
+    let anchor = doc.get_node(id).unwrap().layout.border_rect;
+    click_at(&mut doc, anchor.x + 5.0, anchor.y + 5.0);
+    assert_eq!(doc.open_select, id);
+    let popup = doc.select_popup().unwrap();
+    assert!(popup.rect.y < anchor.y, "open upward near viewport bottom");
+    assert!(popup.rect.right() <= 320.0 && popup.rect.bottom() <= 200.0);
+    let point = (popup.rect.x + 20.0, popup.rect.y + 20.0);
+    let hover_before = doc.hovered_box;
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseMove, point, 0);
+    assert_eq!(doc.hovered_box, hover_before, "covered page must not hover");
+    assert!(doc.process_wheel_event(point, -100.0));
+    assert_eq!(doc.scroll_y, 0.0, "popup wheel must not scroll the page");
+    assert_eq!(doc.dropdown_scroll, 100.0);
+    doc.process_key_event(
+        crate::dom::HtmlEventType::KeyDown,
+        35,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let popup = doc.select_popup().unwrap();
+    let last = popup.rows.last().unwrap();
+    assert!(last.top + last.height <= popup.scroll + popup.rect.h - 4.0 + 0.01);
+    let point = (popup.rect.x + 20.0, popup.rect.bottom() - 10.0);
+    let picked = popup.option_at(point).unwrap().index.unwrap();
+    click_at(&mut doc, point.0, point.1);
+    assert_eq!(doc.selected_index(id), picked as i32);
+    assert_eq!(doc.open_select, 0);
+    assert_eq!(doc.focused_box, id, "covered button must not steal focus");
+}
+
+#[test]
+fn select_popup_disabled_rows_do_not_hover_or_change_selection() {
+    let mut doc = layout_html(
+        "<select id='s'><option>A</option><option disabled>B</option></select>",
+        400.0,
+    );
+    let id = doc.get_element_by_id("s").unwrap();
+    doc.open_select = id;
+    let popup = doc.select_popup().unwrap();
+    let row = &popup.rows[1];
+    let point = (
+        popup.rect.x + 10.0,
+        popup.rect.y + 4.0 + row.top + row.height / 2.0,
+    );
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseMove, point, 0);
+    assert_eq!(doc.dropdown_hover_idx, -1);
+    click_at(&mut doc, point.0, point.1);
+    assert_eq!(doc.selected_index(id), 0);
+}
+
+#[test]
+fn input_cursor_navigation_does_not_emit_input_or_dirty_style() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let mut doc = layout_html("<input id='t' value='hello'>", 400.0);
+    let id = find_by_id(&doc.root, "t").unwrap().node_id;
+    doc.focused_box = id;
+    let count = Arc::new(AtomicUsize::new(0));
+    let callback_count = count.clone();
+    doc.on_form_event = Some(Box::new(move |event| {
+        if matches!(event.kind, FormEventKind::Input(_)) {
+            callback_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }));
+    doc.style_dirty = false;
+    for (key, ctrl) in [(39, false), (65, true), (37, false)] {
+        doc.process_key_event(
+            crate::dom::HtmlEventType::KeyDown,
+            key,
+            None,
+            ctrl,
+            false,
+            false,
+            false,
+        );
+        assert!(!doc.style_dirty, "cursor key {key} must not recascade");
+        assert_eq!(count.load(Ordering::Relaxed), 0);
+    }
+    doc.process_key_event(
+        crate::dom::HtmlEventType::KeyDown,
+        88,
+        Some('x'),
+        false,
+        false,
+        false,
+        false,
+    );
+    assert_eq!(count.load(Ordering::Relaxed), 1);
+    assert!(
+        doc.style_dirty,
+        "a value edit can change validity selectors"
+    );
+}
+
+#[test]
+fn select_keyboard_respects_disabled_fieldset_and_legend_exception() {
+    let mut doc = layout_html(
+        r#"<fieldset disabled><legend><select id="legend"><option>A</option><option>B</option></select></legend>
+        <select id="blocked"><option>A</option><option>B</option></select></fieldset>"#,
+        400.0,
+    );
+    for (name, expected) in [("blocked", 0), ("legend", 1)] {
+        let id = find_by_id(&doc.root, name).unwrap().node_id;
+        doc.focused_box = id;
+        doc.process_key_event(
+            crate::dom::HtmlEventType::KeyDown,
+            40,
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+        assert_eq!(doc.selected_index(id), expected, "select {name}");
+    }
+}
+
 // ── Disabled text rendering ─────────────────────────────────────────────────
 
 #[test]
@@ -3465,6 +4567,75 @@ fn ctrl_a_selects_all_in_input() {
         input.input_sel_anchor, 0,
         "Ctrl+A should set anchor to start"
     );
+}
+
+#[test]
+fn native_value_edits_preserve_all_controls_default_attributes() {
+    let mut doc = layout_html(
+        "<input id='text' value='a'><input id='check' type='checkbox' checked><select><option id='opt' selected>Default</option></select>",
+        400.0,
+    );
+    let text = doc.get_element_by_id("text").unwrap();
+    let check = doc.get_element_by_id("check").unwrap();
+    let opt = doc.get_element_by_id("opt").unwrap();
+    doc.focused_box = text;
+    let node = doc.get_box_by_id_mut(text).unwrap();
+    node.input_cursor = 1;
+    node.input_sel_anchor = 1;
+    assert!(doc.process_key_event(
+        crate::dom::HtmlEventType::KeyDown,
+        66,
+        Some('b'),
+        false,
+        false,
+        false,
+        false
+    ));
+    assert_eq!(doc.value(text), "ab");
+    assert_eq!(doc.get_attribute(text, "value").as_deref(), Some("a"));
+    assert!(
+        doc.get_attribute(check, "checked").is_some(),
+        "typing must not sweep or remove another control's default checked attribute"
+    );
+    assert!(doc.get_attribute(opt, "selected").is_some());
+    let rect = doc.get_node(check).unwrap().layout.border_rect;
+    let point = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseDown, point, 0);
+    doc.process_mouse_event(crate::dom::HtmlEventType::MouseUp, point, 0);
+    assert!(
+        !doc.checked(check),
+        "live checkedness must reflect the native click"
+    );
+    assert!(
+        doc.get_attribute(check, "checked").is_some(),
+        "unchecking must preserve the author's reset default"
+    );
+    assert_eq!(doc.value(text), "ab");
+}
+
+#[test]
+fn native_text_value_geometry_invalidation_respects_field_sizing() {
+    for (tag, sizing, needs_layout) in [
+        ("input", "fixed", false),
+        ("input", "content", true),
+        ("textarea", "fixed", true),
+    ] {
+        let mut control = WebCore::new(tag);
+        std::sync::Arc::make_mut(&mut control.style).field_sizing = sizing.into();
+        control.layout.layout_dirty = false;
+        assert!(process_form_input_key(
+            &mut control,
+            65,
+            Some('a'),
+            false,
+            false
+        ));
+        assert_eq!(input_value(&control), "a");
+        assert_eq!(
+            control.layout.layout_dirty, needs_layout,
+            "{tag} field-sizing:{sizing}"
+        );
+    }
 }
 
 // ── Backspace with selection deletes selection ──────────────────────────────
@@ -3790,6 +4961,307 @@ fn datetime_local_picker_changes_the_day_without_losing_the_time() {
     assert_eq!(doc.value(id), "2026-08-10T12:30");
 }
 
+#[test]
+fn datetime_local_time_picker_preserves_date_precision_and_checks_constraints() {
+    let mut doc = layout_html(
+        "<input id=p type=datetime-local step=any min='2026-08-24T12:00' max='2026-08-24T13:00' value='2026-08-24T12:30:45.125'>",
+        400.0,
+    );
+    let id = doc.get_element_by_id("p").unwrap();
+    let rect = doc.get_node(id).unwrap().layout.border_rect;
+    click_at(&mut doc, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+    let (x, y, w, h) = doc.time_picker_rect(id).unwrap();
+    let (_, calendar_y, _, total_height) = doc.picker_rect(id).unwrap();
+    assert_eq!(y - calendar_y, crate::widgets::Calendar::height());
+    assert_eq!(total_height, crate::widgets::Calendar::height() + h);
+    click_at(
+        &mut doc,
+        x + w / 8.0,
+        y + crate::widgets::TimePicker::ROW * 1.5,
+    );
+    assert_eq!(doc.value(id), "2026-08-24T12:30:45.125");
+    click_at(
+        &mut doc,
+        x + w * 0.75,
+        y + crate::widgets::TimePicker::ROW * 4.5,
+    );
+    assert_eq!(doc.open_picker, id, "13:30 exceeds the datetime max");
+    click_at(
+        &mut doc,
+        x + w / 8.0,
+        y + crate::widgets::TimePicker::ROW * 3.5,
+    );
+    click_at(
+        &mut doc,
+        x + w * 3.0 / 8.0,
+        y + crate::widgets::TimePicker::ROW * 1.5,
+    );
+    click_at(
+        &mut doc,
+        x + w * 0.75,
+        y + crate::widgets::TimePicker::ROW * 4.5,
+    );
+    assert_eq!(doc.value(id), "2026-08-24T12:31:45.125");
+    assert_eq!(doc.open_picker, 0);
+}
+
+#[test]
+fn datetime_local_calendar_commits_the_adjusted_time_draft() {
+    let mut doc = layout_html(
+        "<input id=p type=datetime-local value='2026-08-24T12:30'>",
+        400.0,
+    );
+    let id = doc.get_element_by_id("p").unwrap();
+    let rect = doc.get_node(id).unwrap().layout.border_rect;
+    click_at(&mut doc, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+    doc.process_key_event(
+        crate::dom::HtmlEventType::KeyDown,
+        38,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    let (x, y, _, _) = doc.picker_rect(id).unwrap();
+    let index = crate::widgets::first_weekday(2026, 8) + 9;
+    let cell = crate::widgets::Calendar::CELL;
+    click_at(
+        &mut doc,
+        x + (index % 7) as f32 * cell + cell / 2.0,
+        y + crate::widgets::Calendar::HEADER + (index / 7) as f32 * cell + cell / 2.0,
+    );
+    assert_eq!(doc.value(id), "2026-08-10T13:30");
+    assert_eq!(doc.open_picker, 0);
+    click_at(&mut doc, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+    let (x, y, w, _) = doc.time_picker_rect(id).unwrap();
+    click_at(
+        &mut doc,
+        x + w / 4.0,
+        y + crate::widgets::TimePicker::ROW * 4.5,
+    );
+    assert_eq!(doc.value(id), "");
+    assert_eq!(doc.open_picker, 0);
+}
+
+#[test]
+fn temporal_picker_stays_inside_the_scrolled_viewport_and_opens_above() {
+    let mut doc = layout_html(
+        "<input id=p type=datetime-local value='2026-08-24T12:30'>",
+        400.0,
+    );
+    let id = doc.get_element_by_id("p").unwrap();
+    doc.viewport_h = 500.0;
+    doc.scroll_y = 200.0;
+    doc.scroll_x = 100.0;
+    doc.get_box_by_id_mut(id).unwrap().layout.border_rect = Rect::new(470.0, 650.0, 100.0, 30.0);
+    let (x, y, w, h) = doc.picker_rect(id).unwrap();
+    let inset = crate::types::PickerKind::FRAME_INSET_PX;
+    assert!(x >= doc.scroll_x + inset && x + w <= doc.scroll_x + doc.viewport_w - inset);
+    assert!(y >= doc.scroll_y + inset && y + h <= 650.0);
+    doc.open_picker = id;
+    doc.picker_time = Some(crate::widgets::TimePicker::new("12:30"));
+    let (_, time_y, _, _) = doc.time_picker_rect(id).unwrap();
+    assert_eq!(time_y, y + crate::widgets::Calendar::height());
+}
+
+#[test]
+fn temporal_picker_month_navigation_selects_a_month_not_a_day() {
+    let mut doc = layout_html("<input id=p type=month value=2026-08>", 400.0);
+    let id = doc.get_element_by_id("p").unwrap();
+    let rect = doc.get_node(id).unwrap().layout.border_rect;
+    click_at(&mut doc, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+    assert_eq!(doc.picker_kind(id), Some(crate::types::PickerKind::Month));
+    let (x, y, w, _) = doc.picker_rect(id).unwrap();
+    click_at(
+        &mut doc,
+        x + w - crate::widgets::Calendar::CELL / 2.0,
+        y + crate::widgets::Calendar::CELL / 2.0,
+    );
+    assert_eq!(doc.open_picker, id);
+    assert_eq!(
+        doc.focused_box, id,
+        "picker navigation must retain the control's focus"
+    );
+    assert_eq!(doc.value(id), "2026-08");
+    assert_eq!(doc.picker_month(id).0, 2027);
+    click_at(
+        &mut doc,
+        x + w / 6.0,
+        y + crate::widgets::Calendar::HEADER + crate::widgets::MonthGrid::ROW_HEIGHT / 2.0,
+    );
+    assert_eq!(doc.value(id), "2027-01");
+    assert_eq!(doc.open_picker, 0);
+    click_at(&mut doc, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+    doc.process_key_event(
+        crate::dom::HtmlEventType::KeyDown,
+        27,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    assert_eq!(doc.open_picker, 0);
+    assert_eq!(doc.value(id), "2027-01");
+    click_at(&mut doc, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+    let (x, y, w, h) = doc.picker_rect(id).unwrap();
+    click_at(
+        &mut doc,
+        x + w / 2.0,
+        y + h - crate::widgets::Calendar::CELL / 2.0,
+    );
+    assert_eq!(doc.value(id), "");
+    assert_eq!(doc.open_picker, 0);
+}
+
+#[test]
+fn time_picker_edits_a_draft_and_commits_only_on_done() {
+    let mut doc = layout_html(
+        "<input id=p type=time step=any value='12:30:45.125'>",
+        400.0,
+    );
+    let id = doc.get_element_by_id("p").unwrap();
+    let rect = doc.get_node(id).unwrap().layout.border_rect;
+    click_at(&mut doc, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+    assert_eq!(doc.picker_kind(id), Some(crate::types::PickerKind::Time));
+    let (x, y, w, _) = doc.picker_rect(id).unwrap();
+    click_at(
+        &mut doc,
+        x + w / 8.0,
+        y + crate::widgets::TimePicker::ROW * 1.5,
+    );
+    assert_eq!(doc.value(id), "12:30:45.125");
+    assert_eq!(doc.picker_time.as_ref().unwrap().value(), "13:30:45.125");
+    assert_eq!(doc.open_picker, id);
+    click_at(
+        &mut doc,
+        x + w * 0.75,
+        y + crate::widgets::TimePicker::ROW * 4.5,
+    );
+    assert_eq!(doc.value(id), "13:30:45.125");
+    assert_eq!(doc.open_picker, 0);
+    assert_eq!(
+        doc.get_node(id).unwrap().attributes.get("value").unwrap(),
+        "12:30:45.125"
+    );
+}
+
+#[test]
+fn time_picker_keyboard_cancel_and_constraint_rejection_keep_live_value() {
+    let mut doc = layout_html(
+        "<input id=p type=time min=12:00 max=13:00 value=12:30>",
+        400.0,
+    );
+    let id = doc.get_element_by_id("p").unwrap();
+    let rect = doc.get_node(id).unwrap().layout.border_rect;
+    click_at(&mut doc, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+    for key in [38, 13] {
+        doc.process_key_event(
+            crate::dom::HtmlEventType::KeyDown,
+            key,
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+    }
+    assert_eq!(doc.value(id), "12:30");
+    assert_eq!(
+        doc.open_picker, id,
+        "invalid draft must not commit or close"
+    );
+    doc.process_key_event(
+        crate::dom::HtmlEventType::KeyDown,
+        27,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
+    assert_eq!(doc.open_picker, 0);
+    assert_eq!(doc.value(id), "12:30");
+}
+
+#[test]
+fn text_controls_delete_whole_graphemes_not_combining_marks_or_emoji_parts() {
+    for tag in ["input", "textarea"] {
+        for cluster in ["e\u{301}", "👩‍💻", "🇲🇦"] {
+            for key in [8, 46] {
+                let mut doc = layout_html(&format!("<{tag} id=p></{tag}>"), 400.0);
+                let id = doc.get_element_by_id("p").unwrap();
+                doc.set_value(id, &format!("a{cluster}b"));
+                let node = doc.get_box_by_id_mut(id).unwrap();
+                node.input_cursor = if key == 8 {
+                    1 + cluster.chars().count()
+                } else {
+                    1
+                };
+                node.input_sel_anchor = node.input_cursor;
+                assert!(process_form_input_key(node, key, None, false, false));
+                assert_eq!(input_value(node), "ab", "{tag}, {cluster:?}, {key}");
+                assert_eq!(node.input_cursor, 1);
+            }
+        }
+    }
+}
+
+#[test]
+fn temporal_picker_week_uses_iso_week_year_and_emits_input_then_change() {
+    use std::sync::{Arc, Mutex};
+    let mut doc = layout_html("<input id=p type=week value=2020-W53>", 400.0);
+    let id = doc.get_element_by_id("p").unwrap();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    for kind in ["input", "change"] {
+        let events = events.clone();
+        doc.add_event_listener(
+            id,
+            kind,
+            Box::new(move |_, _| events.lock().unwrap().push(kind)),
+            Default::default(),
+        );
+    }
+    let rect = doc.get_node(id).unwrap().layout.border_rect;
+    click_at(&mut doc, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+    let (x, y, w, _) = doc.picker_rect(id).unwrap();
+    click_at(
+        &mut doc,
+        x + w - crate::widgets::Calendar::CELL / 2.0,
+        y + crate::widgets::Calendar::CELL / 2.0,
+    );
+    assert_eq!(doc.picker_month(id).0, 2021);
+    let cell = crate::widgets::Calendar::CELL;
+    let index = crate::widgets::first_weekday(2021, 1) + 3;
+    click_at(
+        &mut doc,
+        x + (index % 7) as f32 * cell + cell / 2.0,
+        y + crate::widgets::Calendar::HEADER + (index / 7) as f32 * cell + cell / 2.0,
+    );
+    assert_eq!(doc.value(id), "2021-W01");
+    assert_eq!(*events.lock().unwrap(), vec!["input", "change"]);
+}
+
+#[test]
+fn temporal_picker_rejects_bounds_step_and_disabled_updates() {
+    let mut doc = layout_html(
+        "<input id=p type=month value=2026-01 min=2026-01 max=2026-05 step=2>",
+        400.0,
+    );
+    let id = doc.get_element_by_id("p").unwrap();
+    for value in ["2025-12", "2026-02", "2026-06"] {
+        assert!(!doc.picker_value_allowed(id, value));
+        doc.commit_picker_value(id, value);
+        assert_eq!(doc.value(id), "2026-01");
+    }
+    doc.commit_picker_value(id, "2026-03");
+    assert_eq!(doc.value(id), "2026-03");
+    doc.set_attribute(id, "disabled", "");
+    doc.commit_picker_value(id, "2026-05");
+    assert_eq!(doc.value(id), "2026-03");
+}
+
 // ── List box and range: the click paths (HTML §4.10.7, §4.10.5.1.13) ────────
 //
 // Both controls PAINTED long before either could be clicked, which is the one
@@ -3945,7 +5417,7 @@ fn a_drop_down_has_no_unselect_affordance() {
 }
 
 #[test]
-fn a_list_box_click_replaces_the_selection_but_multiple_toggles() {
+fn a_list_box_click_replaces_selection_and_modifier_click_toggles() {
     // Single-select: picking an option deselects every other one.
     let mut doc = layout_html(
         r#"<select id="lb" size="4" style="width:150px;height:100px">
@@ -3968,8 +5440,7 @@ fn a_list_box_click_replaces_the_selection_but_multiple_toggles() {
         "a single-select list box holds one row"
     );
 
-    // `multiple`: each click TOGGLES, so two rows can be held at once — the
-    // state a single index could never express.
+    // Multiple selection requires an additive gesture, not a plain click.
     let mut doc = layout_html(
         r#"<select id="ml" multiple style="width:150px;height:100px">
              <option>one</option><option>two</option><option>three</option>
@@ -3980,6 +5451,13 @@ fn a_list_box_click_replaces_the_selection_but_multiple_toggles() {
     click_at(&mut doc, x, y0);
     let (_, y2) = list_box_row_y(&doc, "ml", 2);
     click_at(&mut doc, x, y2);
+    let selected: Vec<bool> =
+        crate::html::forms::list_of_options(find_by_id(&doc.root, "ml").unwrap())
+            .iter()
+            .map(|o| o.selectedness)
+            .collect();
+    assert_eq!(selected, [false, false, true]);
+    ctrl_click_at(&mut doc, x, y0);
     let ml = find_by_id(&doc.root, "ml").unwrap();
     let selected: Vec<bool> = crate::html::forms::list_of_options(ml)
         .iter()
@@ -3991,8 +5469,8 @@ fn a_list_box_click_replaces_the_selection_but_multiple_toggles() {
         "a multiple list box holds both rows"
     );
 
-    // Clicking a held row again releases it.
-    click_at(&mut doc, x, y0);
+    // Modifier-clicking a held row again releases it.
+    ctrl_click_at(&mut doc, x, y0);
     let ml = find_by_id(&doc.root, "ml").unwrap();
     assert!(!crate::html::forms::list_of_options(ml)[0].selectedness);
 }
@@ -4533,11 +6011,16 @@ fn a_form_submits_what_the_user_did_not_what_the_markup_said() {
 #[test]
 fn date_family_inputs_are_editable_text_controls() {
     for (input_type, start, ch, expected) in [
-        ("date", "2026-09-2", '2', "2026-09-22"),
-        ("month", "2026-0", '9', "2026-09"),
-        ("week", "2026-W0", '4', "2026-W04"),
-        ("time", "12:3", '4', "12:34"),
-        ("datetime-local", "2026-09-22T12:3", '4', "2026-09-22T12:34"),
+        ("date", "2026-09-21", '2', "2026-09-22"),
+        ("month", "2026-08", '9', "2026-09"),
+        ("week", "2026-W03", '4', "2026-W04"),
+        ("time", "12:33", '4', "12:34"),
+        (
+            "datetime-local",
+            "2026-09-22T12:33",
+            '4',
+            "2026-09-22T12:34",
+        ),
     ] {
         let mut doc = layout_html(
             &format!(
@@ -4548,6 +6031,29 @@ fn date_family_inputs_are_editable_text_controls() {
         let rect = find_by_id(&doc.root, "x").unwrap().layout.border_rect;
         let center = (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
         click_at(&mut doc, center.0, center.1);
+
+        // Test inline editing independently from the picker's keyboard draft.
+        doc.process_key_event(
+            crate::dom::HtmlEventType::KeyDown,
+            27,
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
+
+        // Invalid markup values must start empty. Exercise a partial user edit
+        // by deleting from a valid initial value instead of seeding invalid HTML.
+        doc.process_key_event(
+            crate::dom::HtmlEventType::KeyDown,
+            8,
+            None,
+            false,
+            false,
+            false,
+            false,
+        );
 
         doc.process_key_event(
             crate::dom::HtmlEventType::KeyDown,
@@ -4576,9 +6082,18 @@ fn date_family_inputs_are_editable_text_controls() {
 
 #[test]
 fn input_type_matching_is_ascii_case_insensitive_for_editing() {
-    let mut doc = layout_html(r#"<input id="x" type="DATE" value="2026-09-2">"#, 400.0);
+    let mut doc = layout_html(r#"<input id="x" type="DATE" value="2026-09-21">"#, 400.0);
     let rect = find_by_id(&doc.root, "x").unwrap().layout.border_rect;
     click_at(&mut doc, rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+    doc.process_key_event(
+        crate::dom::HtmlEventType::KeyDown,
+        8,
+        None,
+        false,
+        false,
+        false,
+        false,
+    );
     doc.process_key_event(
         crate::dom::HtmlEventType::KeyDown,
         '2' as u32,

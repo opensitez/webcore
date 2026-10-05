@@ -7,6 +7,123 @@ use crate::layout::LayoutEngine;
 use crate::types::*;
 
 #[test]
+fn long_inline_text_snapshot_keeps_offsets_and_updates_after_edits() {
+    let mut renderer = crate::Renderer::new();
+    let text = "alpha beta gamma delta ".repeat(100);
+    let mut doc = renderer.load_html(&format!(
+        "<style>*{{margin:0;padding:0}}#box{{width:160px;font:16px/20px monospace}}</style><div id=box>{text}</div>"
+    ), 400.0);
+    let id = doc.query_selector("#box").unwrap();
+    let node = doc.get_box_by_id(id).unwrap();
+    assert!(node.layout.line_cache.len() > 100);
+    for line in &node.layout.line_cache {
+        assert!(line.text_start + line.text_length <= text.len());
+        assert!(line.width <= 160.1);
+        assert!(!line.char_x.is_empty());
+    }
+    let original: Vec<_> = node
+        .layout
+        .line_cache
+        .iter()
+        .map(|line| {
+            (
+                line.text_start,
+                line.text_length,
+                line.width,
+                line.char_x.clone(),
+            )
+        })
+        .collect();
+    renderer.layout_engine().layout(&mut doc, 400.0);
+    let reused: Vec<_> = doc
+        .get_box_by_id(id)
+        .unwrap()
+        .layout
+        .line_cache
+        .iter()
+        .map(|line| {
+            (
+                line.text_start,
+                line.text_length,
+                line.width,
+                line.char_x.clone(),
+            )
+        })
+        .collect();
+    assert_eq!(reused, original);
+    doc.set_text_content(id, "replaced text");
+    renderer.layout_engine().layout(&mut doc, 400.0);
+    let updated = doc.get_box_by_id(id).unwrap();
+    assert_eq!(updated.layout.line_cache.len(), 1);
+    assert_eq!(
+        crate::layout::inline_layout::collect_flat_text(updated),
+        "replaced text"
+    );
+}
+
+#[test]
+fn break_spaces_preserves_trailing_advances_and_breaks_after_spaces() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        "<style>*{margin:0;padding:0}div{font:16px/20px monospace;white-space:break-spaces;width:1ch}</style><div id=box>A   </div>",
+        400.0,
+    );
+    let node = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|id| id == "box")
+    })
+    .unwrap();
+    assert_eq!(node.style.white_space, WhiteSpace::BreakSpaces);
+    assert_eq!(
+        node.layout.line_cache.len(),
+        3,
+        "{:?}",
+        node.layout.line_cache
+    );
+    assert_eq!(node.layout.line_cache[0].text_length, 2);
+    assert_eq!(node.layout.line_cache[1].text_length, 1);
+    assert_eq!(node.layout.line_cache[2].text_length, 1);
+    assert!(node.layout.line_cache.iter().all(|line| line.width > 0.0));
+    assert!((node.layout.content_rect.h - 60.0).abs() < 0.1);
+}
+
+#[test]
+fn break_spaces_intrinsic_sizes_include_preserved_space() {
+    let mut renderer = crate::Renderer::new();
+    let doc = renderer.load_html(
+        "<style>*{margin:0;padding:0}div{font:16px/20px monospace;white-space:break-spaces}#min{width:min-content}#max{width:max-content}</style><div id=min>A   </div><div id=max>A   </div>",
+        400.0,
+    );
+    let min = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|id| id == "min")
+    })
+    .unwrap();
+    let max = find_box(&doc.root, &|n| {
+        n.attributes.get("id").is_some_and(|id| id == "max")
+    })
+    .unwrap();
+    let engine = renderer.layout_engine();
+    let measure = |text| {
+        engine.measure_text_cached(
+            text,
+            16.0,
+            FontWeight::Normal,
+            FontStyle::Normal,
+            "monospace",
+        )
+    };
+    assert!(
+        (min.layout.content_rect.w - measure("A ")).abs() < 0.1,
+        "{:?}",
+        min.layout.content_rect
+    );
+    assert!(
+        (max.layout.content_rect.w - measure("A   ")).abs() < 0.1,
+        "{:?}",
+        max.layout.content_rect
+    );
+}
+
+#[test]
 fn grid_justify_start_keeps_implicit_auto_track_at_intrinsic_width() {
     for (justify, expected) in [("normal", 600.0), ("start", 180.0)] {
         let doc = parse_and_layout(

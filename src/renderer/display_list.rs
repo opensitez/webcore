@@ -22,12 +22,51 @@ pub struct PlaceholderTypography {
     pub font_style: u8,
     pub font_family: String,
     pub font_stretch: f32,
+    pub normal_line_height: bool,
     pub line_height: f32,
     pub letter_spacing: f32,
     pub word_spacing: f32,
     pub text_transform: TextTransform,
     pub decoration: TextDecoration,
     pub shadow: Option<crate::types::TextShadow>,
+    pub layout: Option<ControlTextLayout>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ControlTextLayout {
+    pub width: f32,
+    pub wrap: cosmic_text::Wrap,
+    pub align: cosmic_text::Align,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ControlTextSelection {
+    /// Character offsets in the displayed (transformed or password-masked) value.
+    pub range: std::ops::Range<usize>,
+    pub background: Color,
+    pub foreground: Color,
+}
+
+impl PlaceholderTypography {
+    pub(crate) fn used_line_height(
+        &self,
+        fonts: &mut cosmic_text::FontSystem,
+        minimum_normal: bool,
+    ) -> f32 {
+        let normal = crate::layout::inline_layout::font_metrics(
+            Some(fonts),
+            &self.font_family,
+            self.font_size,
+        )
+        .2;
+        if self.normal_line_height {
+            normal
+        } else if minimum_normal {
+            self.line_height.max(normal)
+        } else {
+            self.line_height
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -232,7 +271,7 @@ pub enum PaintCmd {
         /// its positioning area across the painting area.
         repeat_x_mode: u8, // 0=no-repeat, 1=repeat, 2=space, 3=round
         repeat_y_mode: u8, // 0=no-repeat, 1=repeat, 2=space, 3=round
-        gradient_type: u8, // 1=linear, 2=radial
+        gradient_type: u8, // 1=linear, 2=radial, 3=repeating-linear, 4=repeating-radial
         angle: f32,
         direction: GradientDirection,
         radial_center_x: f32,
@@ -303,6 +342,7 @@ pub enum PaintCmd {
         text_align: crate::types::TextAlign,
         direction: crate::types::Direction,
         placeholder_color: Color,
+        value_typography: Option<Box<PlaceholderTypography>>,
         placeholder_typography: Option<PlaceholderTypography>,
         file_button_color: Color,
         file_button_background: Color,
@@ -313,6 +353,7 @@ pub enum PaintCmd {
         value: String,
         placeholder: String,
         input_cursor: usize,
+        text_selection: Option<ControlTextSelection>,
         appearance_none: bool,
         /// The control's writing mode is VERTICAL (`vertical-rl`/`vertical-lr`).
         ///
@@ -338,6 +379,8 @@ pub enum PaintCmd {
         /// The selectedness of every option, parallel to `options`. A
         /// `multiple` list box paints all of them, so one index is not enough.
         selected_all: Vec<bool>,
+        /// Native value content scrolls without moving the control's border or scrollbar.
+        content_scroll: (f32, f32),
     },
 
     /// Draw a text shadow (separate from main text for layering).
@@ -591,6 +634,7 @@ impl DisplayListMemoryEstimate {
                 input_type,
                 attributes,
                 font_family,
+                value_typography,
                 placeholder_typography,
                 file_button_font_family,
                 value,
@@ -602,6 +646,12 @@ impl DisplayListMemoryEstimate {
                 self.add_string(tag);
                 self.add_string(input_type);
                 self.add_string(font_family);
+                if let Some(typography) = value_typography {
+                    self.heap_bytes = self
+                        .heap_bytes
+                        .saturating_add(std::mem::size_of::<PlaceholderTypography>());
+                    self.add_string(&typography.font_family);
+                }
                 if let Some(typography) = placeholder_typography {
                     self.add_string(&typography.font_family);
                 }

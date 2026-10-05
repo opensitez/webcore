@@ -8,6 +8,21 @@ use crate::dom::*;
 use crate::html::*;
 use std::collections::{HashMap, HashSet};
 
+impl Document {
+    /// Runs local defaults after an accepted click; navigation stays with the browser.
+    pub(crate) fn activate_control_click(&mut self, target: u32) -> bool {
+        let form_click = handle_form_click(&mut self.root, target, &mut self.on_form_event);
+        if form_click.is_none() {
+            self.fire_element_click(target);
+        }
+        let changed = form_click.unwrap_or(false);
+        if changed {
+            self.style_dirty = true;
+        }
+        self.activate_dialog_command(find_form_parent_id(&self.root, target)) || changed
+    }
+}
+
 /// Returns true if `node` is a focusable element (native or via tabindex/contenteditable).
 /// tabindex=-1 elements return true (focusable by script/click) but are excluded from
 /// the *tab* order by `collect_focusable_ordered`.
@@ -424,11 +439,9 @@ pub fn form_owner_id(root: &WebCore, target_id: u32) -> Option<u32> {
         return None;
     }
     if let Some(form_id) = node.attributes.get("form") {
-        if let Some(form) = find_by_html_id(root, form_id) {
-            if form.tag == "form" {
-                return Some(form.node_id);
-            }
-        }
+        return find_by_html_id(root, form_id)
+            .filter(|form| form.tag == "form")
+            .map(|form| form.node_id);
     }
     ancestor_form_id(root, target_id)
 }
@@ -441,7 +454,7 @@ fn first_legend_child_id(fieldset: &WebCore) -> Option<u32> {
         .map(|child| child.node_id)
 }
 
-fn is_actually_disabled(root: &WebCore, target_id: u32) -> bool {
+pub(crate) fn is_actually_disabled(root: &WebCore, target_id: u32) -> bool {
     if find_node(root, target_id).is_some_and(|node| node.attributes.contains_key("disabled")) {
         return true;
     }
@@ -485,6 +498,9 @@ fn radio_ids_with_owner(root: &WebCore, owner: Option<u32>) -> HashSet<u32> {
 }
 
 fn submitter_form_action(root: &WebCore, submitter_id: u32) -> String {
+    if let Some(form) = find_node(root, submitter_id).filter(|node| node.tag == "form") {
+        return form.attributes.get("action").cloned().unwrap_or_default();
+    }
     let Some(form_id) = form_owner_id(root, submitter_id) else {
         return String::new();
     };
@@ -499,10 +515,16 @@ fn submitter_form_action(root: &WebCore, submitter_id: u32) -> String {
 }
 
 pub fn submitter_form_method(root: &WebCore, submitter_id: u32) -> String {
-    let Some(form_id) = form_owner_id(root, submitter_id) else {
+    let is_form = find_node(root, submitter_id).is_some_and(|node| node.tag == "form");
+    let Some(form_id) = (if is_form {
+        Some(submitter_id)
+    } else {
+        form_owner_id(root, submitter_id)
+    }) else {
         return "get".to_string();
     };
     let raw = find_node(root, submitter_id)
+        .filter(|_| !is_form)
         .and_then(|submitter| submitter.attributes.get("formmethod"))
         .or_else(|| find_node(root, form_id).and_then(|form| form.attributes.get("method")))
         .map(|method| method.trim().to_ascii_lowercase())
@@ -583,58 +605,49 @@ pub fn collect_form_data(form: &WebCore) -> Vec<(String, String)> {
 }
 
 pub fn collect_form_data_for_form(root: &WebCore, form_id: u32) -> Vec<(String, String)> {
+    collect_form_data_with_submitter(root, form_id, None)
+}
+
+#[derive(Clone, Copy)]
+pub struct FormSubmitter {
+    pub node_id: u32,
+    pub image_coordinates: (u32, u32),
+}
+
+pub fn collect_form_data_with_submitter(
+    root: &WebCore,
+    form_id: u32,
+    submitter: Option<FormSubmitter>,
+) -> Vec<(String, String)> {
+    let submitter = submitter.filter(|submitter| {
+        form_owner_id(root, submitter.node_id) == Some(form_id)
+            && !is_actually_disabled(root, submitter.node_id)
+    });
     let mut data = Vec::new();
     let mut seen = HashSet::new();
-    if let Some(form) = find_node(root, form_id) {
-        collect_form_descendant_data(root, form, &mut seen, &mut data);
-    }
-    collect_explicit_form_data(root, root, form_id, &mut seen, &mut data);
-    collect_following_orphan_form_data(root, form_id, &mut seen, &mut data);
+    collect_owned_form_data(root, root, form_id, &mut seen, &mut data, submitter);
+    collect_following_orphan_form_data(root, form_id, &mut seen, &mut data, submitter);
     data
 }
 
-fn collect_form_descendant_data(
-    root: &WebCore,
-    node: &WebCore,
-    seen: &mut HashSet<u32>,
-    data: &mut Vec<(String, String)>,
-) {
-    if listed_element(node)
-        && !(node.tag == "input"
-            && normalize_input_type(
-                node.attributes
-                    .get("type")
-                    .map(|s| s.as_str())
-                    .unwrap_or("text"),
-            ) == "image")
-        && !is_actually_disabled(root, node.node_id)
-        && seen.insert(node.node_id)
-    {
-        append_successful_control(node, data);
-    }
-    for child in &node.children {
-        collect_form_descendant_data(root, child, seen, data);
-    }
-}
-
-fn collect_explicit_form_data(
+fn collect_owned_form_data(
     root: &WebCore,
     node: &WebCore,
     form_id: u32,
     seen: &mut HashSet<u32>,
     data: &mut Vec<(String, String)>,
+    submitter: Option<FormSubmitter>,
 ) {
-    if listed_element(node)
+    if (listed_element(node) || submitter.is_some_and(|s| s.node_id == node.node_id))
         && !seen.contains(&node.node_id)
-        && node.attributes.contains_key("form")
         && form_owner_id(root, node.node_id) == Some(form_id)
         && !is_actually_disabled(root, node.node_id)
     {
         seen.insert(node.node_id);
-        append_successful_control(node, data);
+        append_submission_control(node, data, submitter);
     }
     for child in &node.children {
-        collect_explicit_form_data(root, child, form_id, seen, data);
+        collect_owned_form_data(root, child, form_id, seen, data, submitter);
     }
 }
 
@@ -643,6 +656,7 @@ fn collect_following_orphan_form_data(
     form_id: u32,
     seen: &mut HashSet<u32>,
     data: &mut Vec<(String, String)>,
+    submitter: Option<FormSubmitter>,
 ) {
     fn walk(
         root: &WebCore,
@@ -651,29 +665,85 @@ fn collect_following_orphan_form_data(
         after_form: &mut bool,
         seen: &mut HashSet<u32>,
         data: &mut Vec<(String, String)>,
+        submitter: Option<FormSubmitter>,
     ) {
         if node.node_id == form_id {
             *after_form = true;
         } else if *after_form && node.tag == "form" {
             *after_form = false;
         } else if *after_form
-            && listed_element(node)
+            && (listed_element(node) || submitter.is_some_and(|s| s.node_id == node.node_id))
             && !seen.contains(&node.node_id)
             && node.attributes.get("form").is_none()
             && ancestor_form_id(root, node.node_id).is_none()
             && !is_actually_disabled(root, node.node_id)
         {
             seen.insert(node.node_id);
-            append_successful_control(node, data);
+            append_submission_control(node, data, submitter);
         }
 
         for child in &node.children {
-            walk(root, child, form_id, after_form, seen, data);
+            walk(root, child, form_id, after_form, seen, data, submitter);
         }
     }
 
     let mut after_form = false;
-    walk(root, root, form_id, &mut after_form, seen, data);
+    walk(root, root, form_id, &mut after_form, seen, data, submitter);
+}
+
+fn append_submission_control(
+    node: &WebCore,
+    data: &mut Vec<(String, String)>,
+    submitter: Option<FormSubmitter>,
+) {
+    if let Some(submitter) = submitter.filter(|s| s.node_id == node.node_id) {
+        let raw_type =
+            node.attributes
+                .get("type")
+                .map(String::as_str)
+                .unwrap_or(if node.tag == "button" {
+                    "submit"
+                } else {
+                    "text"
+                });
+        let input_type = if node.tag == "button" {
+            normalize_button_type(raw_type)
+        } else {
+            normalize_input_type(raw_type)
+        };
+        let name = node
+            .attributes
+            .get("name")
+            .map(String::as_str)
+            .unwrap_or("");
+        if node.tag == "input" && input_type == "image" {
+            let prefix = if name.is_empty() {
+                String::new()
+            } else {
+                format!("{name}.")
+            };
+            data.push((
+                format!("{prefix}x"),
+                submitter.image_coordinates.0.to_string(),
+            ));
+            data.push((
+                format!("{prefix}y"),
+                submitter.image_coordinates.1.to_string(),
+            ));
+            return;
+        }
+        if matches!(node.tag.as_str(), "button" | "input")
+            && input_type == "submit"
+            && !name.is_empty()
+        {
+            data.push((
+                name.to_owned(),
+                node.attributes.get("value").cloned().unwrap_or_default(),
+            ));
+            return;
+        }
+    }
+    append_successful_control(node, data);
 }
 
 fn collect_form_data_inner(node: &WebCore, root: &WebCore, data: &mut Vec<(String, String)>) {
@@ -920,18 +990,22 @@ pub fn build_form_submit_url(action: &str, method: &str, data: &[(String, String
 
 /// Apply autofocus: find the first element with the `autofocus` attribute and focus it.
 pub fn apply_autofocus(doc: &mut Document) {
-    fn find_autofocus(node: &WebCore) -> Option<u32> {
-        if node.attributes.contains_key("autofocus") && is_focusable_node(node) {
+    fn find_autofocus(doc: &Document, node: &WebCore) -> Option<u32> {
+        if node.attributes.contains_key("autofocus")
+            && is_focusable_node(node)
+            && !doc.is_actually_disabled(node.node_id)
+            && !doc.is_inert(node.node_id)
+        {
             return Some(node.node_id);
         }
         for child in &node.children {
-            if let Some(id) = find_autofocus(child) {
+            if let Some(id) = find_autofocus(doc, child) {
                 return Some(id);
             }
         }
         None
     }
-    if let Some(id) = find_autofocus(&doc.root) {
+    if let Some(id) = find_autofocus(doc, &doc.root) {
         doc.focused_box = id;
     }
 }

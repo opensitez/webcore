@@ -5,7 +5,6 @@ use super::*;
 use crate::css::*;
 use crate::dom::*;
 use crate::html::*;
-use crate::layout::LayoutEngine;
 use std::collections::{HashMap, HashSet};
 
 impl Document {
@@ -40,7 +39,7 @@ impl Document {
         doc_pt: (f32, f32),
         button: u8,
         ctrl: bool,
-        _shift: bool,
+        shift: bool,
         _alt: bool,
         meta: bool,
     ) -> bool {
@@ -48,6 +47,21 @@ impl Document {
         // same pair every other modified gesture answers to.
         let unselect_request = ctrl || meta;
         use crate::dom::{HtmlEvent, HtmlEventType};
+        if matches!(etype, HtmlEventType::MouseDown | HtmlEventType::MouseUp) {
+            self.pointer_activation_target = None;
+        }
+        if let Some(redraw) = self.select_popup_pointer(etype, doc_pt) {
+            return redraw;
+        }
+        // UA picker surfaces own pointer input; page nodes beneath cannot steal focus.
+        if self.open_picker != 0
+            && matches!(
+                etype,
+                HtmlEventType::MouseDown | HtmlEventType::PointerDown | HtmlEventType::MouseMove
+            )
+        {
+            return etype != HtmlEventType::MouseMove;
+        }
         // client_pos = screen-space logical coordinates (doc coords minus scroll).
         let client_pos = (doc_pt.0, doc_pt.1 - self.scroll_y);
 
@@ -55,12 +69,7 @@ impl Document {
         evt.doc_pos = doc_pt;
         evt.client_pos = client_pos;
         evt.button = button;
-        let hit_result = crate::layout::hit_test::point_to_hit_scrolled(
-            &self.root,
-            doc_pt,
-            (self.scroll_x, self.scroll_y),
-            button,
-        );
+        let hit_result = self.pointer_hit(doc_pt, button);
         let mut hit_node_id: u32 = hit_result.as_ref().map(|h| h.node_id).unwrap_or(0);
         hit_node_id = normalize_pointer_target(&self.root, hit_node_id);
         // For inline links: check if the hit point is inside an inline run
@@ -80,6 +89,9 @@ impl Document {
                     }
                 }
             }
+        }
+        if self.is_inert(hit_node_id) {
+            hit_node_id = 0;
         }
         evt.target = hit_node_id;
 
@@ -110,49 +122,6 @@ impl Document {
                     self.hovered_box = hit_node_id;
                     self.hover_changed = true;
                     redraw = true;
-                }
-                // Track hover over open dropdown
-                if self.open_select != 0 {
-                    let open_sel_id = self.open_select;
-                    let sel = match self.get_node(open_sel_id) {
-                        Some(s) => s,
-                        None => {
-                            self.open_select = 0;
-                            return redraw;
-                        }
-                    };
-                    let dropdown_y = sel.layout.border_rect.y + sel.layout.border_rect.h;
-                    let font_px = sel.style.font_size_px(16.0, 16.0);
-                    let item_h = font_px * 1.8;
-                    let group_h = font_px * 1.5;
-                    let mut y_acc = 0.0f32;
-                    let mut new_hover: i32 = -1;
-                    let mut opt_i = 0usize;
-                    let rel_y = doc_pt.1 - dropdown_y - 4.0;
-                    for child in &sel.children {
-                        if child.tag == "option" {
-                            if rel_y >= y_acc && rel_y < y_acc + item_h {
-                                new_hover = opt_i as i32;
-                            }
-                            y_acc += item_h;
-                            opt_i += 1;
-                        } else if child.tag == "optgroup" {
-                            y_acc += group_h;
-                            for gc in &child.children {
-                                if gc.tag == "option" {
-                                    if rel_y >= y_acc && rel_y < y_acc + item_h {
-                                        new_hover = opt_i as i32;
-                                    }
-                                    y_acc += item_h;
-                                    opt_i += 1;
-                                }
-                            }
-                        }
-                    }
-                    if new_hover != self.dropdown_hover_idx {
-                        self.dropdown_hover_idx = new_hover;
-                        redraw = true;
-                    }
                 }
                 // Drag: if mouse button held and moved past threshold, fire DragStart/Drag.
                 if self.drag_source != 0 {
@@ -192,6 +161,7 @@ impl Document {
                     redraw = true;
                 }
                 if etype == HtmlEventType::MouseDown {
+                    self.keyboard_space_target = 0;
                     self.mousedown_target = hit_node_id;
                     // Arm drag state machine.
                     self.drag_source = hit_node_id;
@@ -217,6 +187,8 @@ impl Document {
                         0u32
                     };
                     let click_focusable = focus_target_id != 0
+                        && !self.is_actually_disabled(focus_target_id)
+                        && !self.is_inert(focus_target_id)
                         && self
                             .get_node(focus_target_id)
                             .map(|fp| is_focusable_node(fp))
@@ -224,40 +196,9 @@ impl Document {
                     let new_focus = if click_focusable {
                         focus_target_id
                     } else {
-                        0u32
+                        self.active_modal_dialog().unwrap_or(0)
                     };
-                    if self.focused_box != new_focus {
-                        let old_focus = self.focused_box;
-                        self.keyboard_focus = false;
-                        self.focused_box = new_focus;
-                        if old_focus != 0 {
-                            self.svg_trigger_event(old_focus, "blur");
-                            let mut e = HtmlEvent::new(HtmlEventType::Blur);
-                            e.target = old_focus;
-                            e.related_target = new_focus;
-                            self.dispatch_input_event(e);
-                            self.svg_trigger_event(old_focus, "focusout");
-                            let mut e = HtmlEvent::new(HtmlEventType::FocusOut);
-                            e.target = old_focus;
-                            e.related_target = new_focus;
-                            self.dispatch_input_event(e);
-                        }
-                        if new_focus != 0 {
-                            self.svg_trigger_event(new_focus, "focus");
-                            let mut e = HtmlEvent::new(HtmlEventType::Focus);
-                            e.target = new_focus;
-                            e.related_target = old_focus;
-                            self.dispatch_input_event(e);
-                            self.svg_trigger_event(new_focus, "focusin");
-                            let mut e = HtmlEvent::new(HtmlEventType::FocusIn);
-                            e.target = new_focus;
-                            e.related_target = old_focus;
-                            self.dispatch_input_event(e);
-                        }
-                        // The frame's next style pass applies :focus and
-                        // :focus-within. Rebuilding the rule index and
-                        // recascading here made a click do the same work twice.
-                        self.style_dirty = true;
+                    if self.set_focus_target(new_focus, false) {
                         redraw = true;
                     }
                 }
@@ -269,12 +210,7 @@ impl Document {
                 // there, which is what makes the first `input` fire before any
                 // movement at all.
                 let range_id = find_form_parent_id(&self.root, hit_node_id);
-                if self.is_range_input(range_id)
-                    && !self
-                        .get_node(range_id)
-                        .map(|n| n.attributes.contains_key("disabled"))
-                        .unwrap_or(true)
-                {
+                if self.is_range_input(range_id) && !self.is_actually_disabled(range_id) {
                     self.range_drag_origin = self
                         .find_webcore(range_id)
                         .map(input_value)
@@ -330,49 +266,92 @@ impl Document {
                     // Either outcome closes it: a swatch picks, anywhere else
                     // dismisses, and neither reaches the page beneath.
                     if self.open_picker != 0 {
+                        if button != 0 {
+                            return true;
+                        }
                         let picker_id = self.open_picker;
+                        if self.picker_kind(picker_id) == Some(PickerKind::Time)
+                            || self
+                                .time_picker_rect(picker_id)
+                                .is_some_and(|(x, y, w, h)| {
+                                    doc_pt.0 >= x
+                                        && doc_pt.0 < x + w
+                                        && doc_pt.1 >= y
+                                        && doc_pt.1 < y + h
+                                })
+                        {
+                            if let Some((x, y, _, _)) = self.time_picker_rect(picker_id) {
+                                let action = crate::widgets::TimePicker::action_at((
+                                    doc_pt.0 - x,
+                                    doc_pt.1 - y,
+                                ));
+                                match action {
+                                    Some(crate::widgets::TimeAction::Adjust(column, delta)) => {
+                                        if let Some(draft) = self.picker_time.as_mut() {
+                                            draft.adjust(column, delta);
+                                        }
+                                        return true;
+                                    }
+                                    Some(crate::widgets::TimeAction::Select(column)) => {
+                                        if let Some(draft) = self.picker_time.as_mut() {
+                                            draft.select(column);
+                                        }
+                                        return true;
+                                    }
+                                    Some(crate::widgets::TimeAction::Commit) => {
+                                        if let Some(value) = self.time_picker_value(picker_id) {
+                                            if !self.picker_value_allowed(picker_id, &value) {
+                                                return true;
+                                            }
+                                            self.commit_picker_value(picker_id, &value);
+                                        }
+                                    }
+                                    Some(crate::widgets::TimeAction::Clear) => {
+                                        self.commit_picker_value(picker_id, "");
+                                    }
+                                    None if doc_pt.0 >= x
+                                        && doc_pt.0 < x + crate::widgets::Calendar::width()
+                                        && doc_pt.1 >= y
+                                        && doc_pt.1 < y + crate::widgets::TimePicker::HEIGHT =>
+                                    {
+                                        return true;
+                                    }
+                                    None => {}
+                                }
+                            }
+                            self.open_picker = 0;
+                            self.picker_time = None;
+                            self.mousedown_target = 0;
+                            return true;
+                        }
+                        if self.navigate_picker(picker_id, doc_pt) {
+                            self.mousedown_target = 0;
+                            return true;
+                        }
+                        if self.picker_clear_hit(picker_id, doc_pt) {
+                            self.commit_picker_value(picker_id, "");
+                            self.open_picker = 0;
+                            self.mousedown_target = 0;
+                            return true;
+                        }
                         // What a pick MEANS depends on the control: a swatch is
                         // a colour, a cell is a date. Both write a value in the
                         // format that control's spec requires, and both close.
                         let picked = match self.picker_kind(picker_id) {
                             Some(PickerKind::Calendar) => self
                                 .calendar_hit(picker_id, doc_pt)
-                                .map(|(y, m, d)| {
-                                    let date = crate::widgets::to_date_value(y, m, d);
-                                    let is_datetime = self.find_webcore(picker_id)
-                                        .and_then(|node| node.attributes.get("type"))
-                                        .is_some_and(|kind| kind.eq_ignore_ascii_case("datetime-local"));
-                                    if is_datetime {
-                                        let old = self.find_webcore(picker_id).map(input_value).unwrap_or_default();
-                                        format!("{date}T{}", old.split_once('T').map(|(_, time)| time).unwrap_or("00:00"))
-                                    } else {
-                                        date
-                                    }
-                                }),
+                                .and_then(|(y, m, d)| self.calendar_value(picker_id, y, m, d)),
+                            Some(PickerKind::Month) => self.month_hit(picker_id, doc_pt),
                             _ => self
                                 .picker_hit(picker_id, doc_pt)
                                 .map(crate::widgets::to_simple_colour),
                         };
                         if let Some(value) = picked {
-                            self.set_value(picker_id, &value);
-                            let (id, name) = self
-                                .find_webcore(picker_id)
-                                .map(|n| {
-                                    (
-                                        n.attributes.get("id").cloned().unwrap_or_default(),
-                                        n.attributes.get("name").cloned().unwrap_or_default(),
-                                    )
-                                })
-                                .unwrap_or_default();
-                            if let Some(ref mut cb) = self.on_form_event {
-                                cb(&FormEvent {
-                                    tag: "input".to_string(),
-                                    id,
-                                    name,
-                                    kind: FormEventKind::Change(value),
-                                    element: picker_id,
-                                });
+                            if !self.picker_value_allowed(picker_id, &value) {
+                                self.mousedown_target = 0;
+                                return true;
                             }
+                            self.commit_picker_value(picker_id, &value);
                         }
                         self.open_picker = 0;
                         self.mousedown_target = 0;
@@ -393,6 +372,7 @@ impl Document {
                     if (hit_node_id != 0 && hit_node_id == self.mousedown_target
                         || self.open_select != 0)
                         && !was_dragging
+                        && !self.is_actually_disabled(find_form_parent_id(&self.root, hit_node_id))
                     {
                         let mut click = HtmlEvent::new(HtmlEventType::Click);
                         click.target = hit_node_id;
@@ -404,6 +384,9 @@ impl Document {
                             redraw = true;
                         }
                         let click_default_allowed = !click.default_prevented;
+                        if button == 0 && click_default_allowed && !self.is_inert(hit_node_id) {
+                            self.pointer_activation_target = Some(hit_node_id);
+                        }
 
                         // Form element interactions
                         // The second half of the popup rule: an OPEN DROPDOWN
@@ -415,50 +398,17 @@ impl Document {
                             && button == 0
                             && click_default_allowed
                         {
-                            let form_click = (hit_node_id != 0)
-                                .then(|| {
-                                    handle_form_click(
-                                        &mut self.root,
-                                        hit_node_id,
-                                        &mut self.on_form_event,
-                                    )
-                                })
-                                .flatten();
-                            // **EVERY element gets a `click`, not just the form
-                            // controls.** `handle_form_click` answers `None` for
-                            // anything it does not recognise, and that was the
-                            // end of the road: a listener on a `<td>`, a `<div>`
-                            // or an `<li>` was registered, was reachable, and
-                            // never fired — so a composed control could be built
-                            // out of ordinary elements and could not be clicked.
-                            // UI Events puts `click` on the element the pointer
-                            // pressed and released over, whatever it is.
-                            if form_click.is_none() && hit_node_id != 0 {
-                                self.fire_element_click(hit_node_id);
-                            }
-                            if let Some(form_redraw) = form_click {
-                                if form_redraw {
-                                    redraw = true;
-                                }
-                                // `handle_form_click` takes `&mut WebCore`, so it
-                                // wrote `checked` to the render tree only. Push it
-                                // into the arena before anything reads the DOM
-                                // through the WHATWG accessors — see
-                                // `Document::sync_form_state_to_arena`.
-                                self.sync_form_state_to_arena();
-                                // **A state change is a STYLE change.** The
-                                // cascade is cached, so `:checked` (and
-                                // `:checked + label`, and every rule keyed off
-                                // it) keeps whatever it computed BEFORE the
-                                // click until something says otherwise. Ticking
-                                // a box changed the state, painted the tick and
-                                // left the styling on the previous frame's
-                                // answer.
-                                self.style_dirty = true;
+                            if hit_node_id != 0 && self.activate_control_click(hit_node_id) {
+                                redraw = true;
                             }
                             if hit_node_id != 0 && button == 0 && self.is_media_element(hit_node_id)
                             {
-                                if let Some(time) =
+                                if let Some(muted) = self.media_mute_for_point(hit_node_id, doc_pt)
+                                {
+                                    if self.media_set_muted(hit_node_id, muted) {
+                                        redraw = true;
+                                    }
+                                } else if let Some(time) =
                                     self.media_seek_time_for_point(hit_node_id, doc_pt)
                                 {
                                     if self.media_set_current_time(hit_node_id, time) {
@@ -492,103 +442,7 @@ impl Document {
                                 }
                             }
 
-                            // Handle select dropdown
-                            if self.open_select != 0 {
-                                // Collect options from DOM children
-                                let sel = self.get_node(self.open_select).unwrap();
-                                let font_px = sel.style.font_size_px(16.0, 16.0);
-                                let item_h = font_px * 1.8;
-                                let group_h = font_px * 1.5;
-
-                                // Count items (options + optgroups) for height
-                                let mut total_h = 8.0f32; // padding
-                                for child in &sel.children {
-                                    if child.tag == "option" {
-                                        total_h += item_h;
-                                    } else if child.tag == "optgroup" {
-                                        total_h += group_h;
-                                        for gc in &child.children {
-                                            if gc.tag == "option" {
-                                                total_h += item_h;
-                                            }
-                                        }
-                                    }
-                                }
-
-                                let dropdown_y =
-                                    sel.layout.border_rect.y + sel.layout.border_rect.h;
-                                let popup_w = sel.layout.border_rect.w.max(150.0);
-                                let click_y = doc_pt.1;
-                                let click_x = doc_pt.0;
-
-                                if click_y >= dropdown_y
-                                    && click_y < dropdown_y + total_h
-                                    && click_x >= sel.layout.border_rect.x
-                                    && click_x < sel.layout.border_rect.x + popup_w
-                                {
-                                    // Determine which option was clicked
-                                    let rel_y = click_y - dropdown_y - 4.0;
-                                    let mut y_acc = 0.0f32;
-                                    let mut clicked_opt: Option<usize> = None;
-                                    let mut opt_i = 0usize;
-                                    for child in &sel.children {
-                                        if child.tag == "option" {
-                                            if rel_y >= y_acc && rel_y < y_acc + item_h {
-                                                clicked_opt = Some(opt_i);
-                                                break;
-                                            }
-                                            y_acc += item_h;
-                                            opt_i += 1;
-                                        } else if child.tag == "optgroup" {
-                                            y_acc += group_h;
-                                            for gc in &child.children {
-                                                if gc.tag == "option" {
-                                                    if rel_y >= y_acc && rel_y < y_acc + item_h {
-                                                        clicked_opt = Some(opt_i);
-                                                        break;
-                                                    }
-                                                    y_acc += item_h;
-                                                    opt_i += 1;
-                                                }
-                                            }
-                                            if clicked_opt.is_some() {
-                                                break;
-                                            }
-                                        }
-                                    }
-
-                                    if let Some(opt_idx) = clicked_opt {
-                                        let sel_id = self.open_select;
-                                        // The option's node_id, so the pick runs
-                                        // over the spec's own list of options
-                                        // rather than this popup's parallel
-                                        // walk — the two counted optgroups the
-                                        // same way, but only one of them is the
-                                        // definition.
-                                        let option_id = self
-                                            .find_webcore(sel_id)
-                                            .map(crate::html::forms::option_ids)
-                                            .and_then(|ids| ids.get(opt_idx).copied());
-                                        if let (Some(option_id), Some(sel_mut)) =
-                                            (option_id, self.find_webcore_mut(sel_id))
-                                        {
-                                            let changed =
-                                                crate::html::forms::pick_option(sel_mut, option_id);
-                                            sel_mut.layout.layout_dirty = true;
-                                            if changed {
-                                                // `option:checked` is a selector.
-                                                self.style_dirty = true;
-                                                self.send_select_update_notifications(sel_id);
-                                            }
-                                        }
-                                    }
-                                    self.open_select = 0;
-                                    redraw = true;
-                                } else {
-                                    self.open_select = 0;
-                                    redraw = true;
-                                }
-                            } else {
+                            {
                                 // Check if clicking a select to open it
                                 let effective_id = find_form_parent_id(&self.root, hit_node_id);
                                 let is_select = self
@@ -616,6 +470,7 @@ impl Document {
                                         effective_id,
                                         doc_pt.1,
                                         unselect_request,
+                                        shift,
                                     ) {
                                         // Selectedness is a SELECTOR
                                         // (`option:checked`), so the cascade has
@@ -626,6 +481,9 @@ impl Document {
                                     }
                                 } else if is_select {
                                     self.open_select = effective_id;
+                                    self.dropdown_scroll = 0.0;
+                                    self.dropdown_hover_idx = -1;
+                                    self.reveal_select_popup_selection();
                                     redraw = true;
                                 } else if self.is_range_input(effective_id) {
                                     // ⛔ NOTHING on release. A range is the one
@@ -634,9 +492,13 @@ impl Document {
                                     // handling it here as well would move the
                                     // knob a second time to wherever the
                                     // pointer happened to end.
-                                } else if let Some(rect) = self.find_webcore(effective_id)
-                                    .filter(|node| node.tag == "input"
-                                        && node.attributes.get("type").map(String::as_str) == Some("number"))
+                                } else if let Some(rect) = self
+                                    .find_webcore(effective_id)
+                                    .filter(|node| {
+                                        node.tag == "input"
+                                            && node.attributes.get("type").map(String::as_str)
+                                                == Some("number")
+                                    })
                                     .map(|node| node.layout.content_rect)
                                 {
                                     let well = crate::widgets::Stepper::well_width(rect.h);
@@ -644,9 +506,11 @@ impl Document {
                                         && doc_pt.0 < rect.x + rect.w
                                         && doc_pt.1 >= rect.y
                                         && doc_pt.1 < rect.y + rect.h
-                                        && self.step_number_input(effective_id, doc_pt.1 < rect.y + rect.h / 2.0)
+                                        && self.step_number_input(
+                                            effective_id,
+                                            doc_pt.1 < rect.y + rect.h / 2.0,
+                                        )
                                     {
-                                        self.sync_form_state_to_arena();
                                         self.style_dirty = true;
                                         redraw = true;
                                     }
@@ -656,6 +520,25 @@ impl Document {
                                     // user agent and says only that one is
                                     // offered.
                                     self.open_picker = effective_id;
+                                    self.picker_calendar = None;
+                                    self.picker_time = self
+                                        .get_node(effective_id)
+                                        .filter(|node| {
+                                            node.attributes.get("type").is_some_and(|kind| {
+                                                matches!(
+                                                    kind.trim().to_ascii_lowercase().as_str(),
+                                                    "time" | "datetime-local"
+                                                )
+                                            })
+                                        })
+                                        .map(|node| {
+                                            let value = input_value(node);
+                                            crate::widgets::TimePicker::new(
+                                                value
+                                                    .split_once('T')
+                                                    .map_or(value.as_str(), |(_, time)| time),
+                                            )
+                                        });
                                     redraw = true;
                                 }
                             }
@@ -687,15 +570,13 @@ impl Document {
                     }
                     self.mousedown_target = 0;
                     // Track visited links + fire on_navigate callback.
-                    if button == 0 {
-                        if let Some(href) =
-                            crate::layout::hit_test::hit_test_link_scrolled(
-                                &self.root,
-                                doc_pt,
-                                (self.scroll_x, self.scroll_y),
-                                button,
-                            )
-                        {
+                    if button == 0
+                        && self.pointer_activation_target.is_some()
+                        && !was_dragging
+                        && !self.editor.has_selection()
+                        && !self.is_inert(hit_node_id)
+                    {
+                        if let Some(href) = self.pointer_link(doc_pt, button) {
                             self.visited_urls.insert(href.clone());
                             if let Some(ref mut cb) = self.on_navigate {
                                 cb(&href);
@@ -713,27 +594,23 @@ impl Document {
         }
 
         // Only perform editor/default behavior if not prevented by handlers.
-        if !evt.default_prevented {
-            if self
-                .editor
-                .handle_mouse_event_scrolled(
-                    &self.root,
-                    etype,
-                    doc_pt,
-                    (self.scroll_x, self.scroll_y),
-                    button,
-                )
-            {
+        if !evt.default_prevented && !self.is_inert(hit_node_id) {
+            if self.editor.handle_mouse_event_scrolled_with_modifiers(
+                &self.root,
+                etype,
+                doc_pt,
+                (self.scroll_x, self.scroll_y),
+                button,
+                shift,
+            ) {
                 redraw = true;
             }
         }
 
-        // Full cascade + layout only when event handlers or editor logic changed
-        // DOM state (class toggles, etc.), not merely for hover/active pointer updates.
+        // Event handlers can mutate style, but layout belongs to the next frame,
+        // not to each pointer callback in a burst of input.
         if handled {
-            let width = self.root.layout.last_containing_width.max(0.0);
             self.style_dirty = true;
-            LayoutEngine::new().layout(self, width);
         }
 
         redraw
@@ -745,14 +622,7 @@ impl Document {
     pub fn dispatch_over_out(&mut self, doc_pt: (f32, f32)) -> bool {
         use crate::dom::{HtmlEvent, HtmlEventType};
         let client_pos = (doc_pt.0, doc_pt.1 - self.scroll_y);
-        let raw_new_id: u32 = crate::layout::hit_test::point_to_hit_scrolled(
-            &self.root,
-            doc_pt,
-            (self.scroll_x, self.scroll_y),
-            0,
-        )
-            .map(|h| h.node_id)
-            .unwrap_or(0);
+        let raw_new_id: u32 = self.pointer_hit(doc_pt, 0).map(|h| h.node_id).unwrap_or(0);
         let new_id = normalize_pointer_target(&self.root, raw_new_id);
         let old_id = self.hovered_box;
         if new_id == old_id {

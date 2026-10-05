@@ -12,6 +12,22 @@
 
 use crate::types::Document;
 
+#[test]
+fn break_spaces_is_inherited_and_serialized_by_cssom() {
+    let mut renderer = crate::Renderer::new();
+    let mut document = renderer.load_html(
+        "<style>#parent{white-space:break-spaces}</style><div id=parent><span id=child>A  B</span></div>",
+        400.0,
+    );
+    for name in ["parent", "child"] {
+        let id = document.get_element_by_id(name).unwrap();
+        assert_eq!(
+            document.computed_style_property(id, "white-space"),
+            "break-spaces"
+        );
+    }
+}
+
 const PAGE: &str = r#"<style>
 #a { position: fixed; color: #010203; background-color: rgba(1,2,3,0.5); font-size: 20px;
      font-weight: bold; margin-top: 1em; padding-left: 3px; border-top: 2px dashed red;
@@ -26,6 +42,101 @@ const PAGE: &str = r#"<style>
 fn page() -> Document {
     let mut renderer = crate::Renderer::new();
     renderer.load_html(PAGE, 800.0)
+}
+
+#[test]
+fn cssom_reads_preserve_completed_font_aware_layout() {
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        "<style>p{font:32px/normal monospace;width:170px;padding:3px}p::before{content:'x'}</style><p id=box>Wide words <a href=#>inline link</a> after text</p>",
+        800.0,
+    );
+    let id = doc.get_element_by_id("box").unwrap();
+    let generation = doc.layout_generation;
+    let before = doc.get_node(id).unwrap().layout.line_cache.clone();
+    let rect = doc.get_bounding_client_rect(id).unwrap();
+    for property in ["font-size", "width", "padding", "border", "line-height"] {
+        assert!(!doc.computed_style_property(id, property).is_empty());
+    }
+    assert!(
+        !doc.computed_style_pseudo_property(id, "before", "color")
+            .is_empty()
+    );
+    assert_eq!(doc.layout_generation, generation);
+    assert_eq!(doc.get_bounding_client_rect(id).unwrap(), rect);
+    let after = &doc.get_node(id).unwrap().layout.line_cache;
+    assert_eq!(after.len(), before.len());
+    for (a, b) in after.iter().zip(&before) {
+        assert_eq!(
+            (a.x, a.y, a.width, a.height, a.text_length),
+            (b.x, b.y, b.width, b.height, b.text_length)
+        );
+    }
+}
+
+#[test]
+fn cssom_dirty_batch_flushes_once_with_the_owning_engine() {
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        "<div id=box style='width:100px;padding:2px'>Text</div>",
+        800.0,
+    );
+    let id = doc.get_element_by_id("box").unwrap();
+    let generation = doc.layout_generation;
+    doc.set_style_property(id, "width", "200px");
+    doc.update_computed_style(renderer.layout_engine());
+    assert!(doc.layout_generation > generation);
+    let updated = doc.layout_generation;
+    assert_eq!(doc.computed_style_property_current(id, "width"), "200px");
+    assert_eq!(doc.computed_style_property_current(id, "padding"), "2px");
+    doc.update_computed_style(renderer.layout_engine());
+    assert_eq!(doc.layout_generation, updated);
+}
+
+#[test]
+fn cssom_used_sizes_respect_box_sizing_without_transforms() {
+    let mut renderer = crate::Renderer::new();
+    let mut doc = renderer.load_html(
+        "<style>div{width:100px;height:60px;padding:10px;border:2px solid;transform:scale(2)}#border{box-sizing:border-box}</style><div id=content></div><div id=border></div>",
+        800.0,
+    );
+    for name in ["content", "border"] {
+        let id = doc.get_element_by_id(name).unwrap();
+        assert_eq!(doc.computed_style_property(id, "width"), "100px");
+        assert_eq!(doc.computed_style_property(id, "height"), "60px");
+    }
+}
+
+#[test]
+fn initial_normal_line_height_is_not_serialized_as_auto() {
+    let mut document = page();
+    let id = document.get_element_by_id("b").unwrap();
+    assert_eq!(
+        document.computed_style_property(id, "line-height"),
+        "normal"
+    );
+}
+
+#[test]
+fn font_width_aliases_expose_computed_percentages_and_inherit() {
+    let mut renderer = crate::Renderer::new();
+    let mut document = renderer.load_html(
+        r#"<style>
+        #parent { font-width: calc(80% + 15%); font-width: -10%; }
+        #parent::before { content: "x"; font-stretch: expanded; }
+        </style><div id=parent><span id=child>Text</span></div>"#,
+        800.0,
+    );
+    let parent = document.get_element_by_id("parent").unwrap();
+    let child = document.get_element_by_id("child").unwrap();
+    for property in ["font-width", "font-stretch"] {
+        assert_eq!(document.computed_style_property(parent, property), "95%");
+        assert_eq!(document.computed_style_property(child, property), "95%");
+        assert_eq!(
+            document.computed_style_pseudo_property(parent, "before", property),
+            "125%"
+        );
+    }
 }
 fn el(d: &Document, id: &str) -> u32 {
     d.get_element_by_id(id).unwrap()

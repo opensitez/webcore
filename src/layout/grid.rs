@@ -160,13 +160,8 @@ pub fn layout_grid_subgrid(
 
     let content_w: f32 =
         col_px.iter().sum::<f32>() + col_gap * col_px.len().saturating_sub(1) as f32;
-    let _query_container_scope = engine.enter_query_container(
-        node,
-        content_w,
-        rbox.content_height,
-        font_px,
-        root_font_px,
-    );
+    let _query_container_scope =
+        engine.enter_query_container(node, content_w, rbox.content_height, font_px, root_font_px);
     let n_cols = col_px.len().max(1);
     // --- Collect visible items ---
     let mut item_indices: Vec<Vec<usize>> = collect_grid_children(node)
@@ -205,10 +200,14 @@ pub fn layout_grid_subgrid(
 
     // --- Placement ---
     let area_map = build_area_map(&node.style.rare().grid_template_areas);
-    let sub_col_names = node.style.grid_col_line_names.clone();
-    let sub_row_names = node.style.grid_row_line_names.clone();
+    let (sub_col_names, sub_row_names) = placement_line_names(&node.style, &area_map);
     let mut placements: Vec<(usize, usize, usize, usize)> = vec![(0, 1, 0, 1); n_items];
-    let mut max_row = 0usize;
+    let mut max_row = node
+        .style
+        .rare()
+        .grid_template_rows
+        .len()
+        .max(node.style.rare().grid_template_areas.len());
     let mut max_col = n_cols;
 
     for (ii, path) in item_indices.iter().enumerate() {
@@ -265,8 +264,12 @@ pub fn layout_grid_subgrid(
         let (cs_span, cs_val) = decode_grid_line(child.style.grid_column_start);
         let col_is_definite = (!cs_span && cs_val != 0)
             || (!child.style.grid_column_start_name.is_empty()
-                && lookup_named_line(&child.style.grid_column_start_name, &sub_col_names)
-                    .is_some());
+                && lookup_placement_line(
+                    &child.style.grid_column_start_name,
+                    &sub_col_names,
+                    false,
+                )
+                .is_some());
 
         let (use_cs, use_ce, span_col) = if col_is_definite {
             // Column already resolved — keep it
@@ -521,6 +524,7 @@ pub fn layout_grid_subgrid(
         ch,
         font_px,
         root_font_px,
+        Some(ch),
     )
 }
 
@@ -571,6 +575,16 @@ pub fn layout_grid(
             engine.intrinsic_width(&kind, node, content_w, font_px, root_font_px, containing_w);
     }
     let mut resolved_box = *rbox;
+    let height_limits = engine.resolved_content_height_limits(
+        &node.style,
+        rbox,
+        c.available_height,
+        font_px,
+        root_font_px,
+    );
+    if let Some(height) = resolved_box.content_height {
+        resolved_box.content_height = Some(height.clamp(height_limits.0, height_limits.1));
+    }
     resolved_box.content_width = Some(content_w);
     engine.clamp_resolved_content_width(
         &mut resolved_box,
@@ -628,13 +642,8 @@ pub fn layout_grid(
         track_lengths,
     );
     let row_tracks = node.style.rare().grid_template_rows.clone();
-    let _query_container_scope = engine.enter_query_container(
-        node,
-        content_w,
-        rbox.content_height,
-        font_px,
-        root_font_px,
-    );
+    let _query_container_scope =
+        engine.enter_query_container(node, content_w, rbox.content_height, font_px, root_font_px);
 
     // Collect visible items (non-abs-positioned)
     // CSS Grid §4: whitespace-only anonymous grid items are not rendered
@@ -674,7 +683,7 @@ pub fn layout_grid(
     }
 
     let n_items = item_indices.len();
-    if n_items == 0 {
+    if n_items == 0 && row_tracks.is_empty() && node.style.rare().grid_template_areas.is_empty() {
         let ch = rbox.content_height.unwrap_or(0.0);
         node.layout.layout_dirty = false;
         let result = finish_grid(
@@ -687,6 +696,7 @@ pub fn layout_grid(
             ch,
             font_px,
             root_font_px,
+            c.available_height,
         );
         layout_abs_children(engine, node, font_px, root_font_px, None);
         return result;
@@ -696,8 +706,7 @@ pub fn layout_grid(
 
     // Named area lookup
     let area_map = build_area_map(&node.style.rare().grid_template_areas);
-    let col_line_names = node.style.grid_col_line_names.clone();
-    let row_line_names = node.style.grid_row_line_names.clone();
+    let (col_line_names, row_line_names) = placement_line_names(&node.style, &area_map);
 
     let n_explicit_cols = col_tracks.len();
     let n_explicit_rows = row_tracks.len();
@@ -714,7 +723,8 @@ pub fn layout_grid(
     let mut placements: Vec<(usize, usize, usize, usize)> = vec![(0, 1, 0, 1); n_items];
 
     // Pass 1: Place items with explicit positions
-    let mut max_row = if area_rows > 0 { area_rows } else { 0 };
+    // Grid 1 section 7.1: explicit tracks exist even when no item occupies them.
+    let mut max_row = n_explicit_rows.max(area_rows);
     let mut max_col = if n_explicit_cols > 0 {
         n_explicit_cols
     } else if area_cols > 0 {
@@ -784,7 +794,8 @@ pub fn layout_grid(
             // Row-locked: row_start is a definite line (positive/negative or named, not span/auto)
             let (rs_is_span, rs_val) = decode_grid_line(child.style.grid_row_start);
             let rs_has_name = !child.style.grid_row_start_name.is_empty()
-                && lookup_named_line(&child.style.grid_row_start_name, &row_line_names).is_some();
+                && lookup_placement_line(&child.style.grid_row_start_name, &row_line_names, false)
+                    .is_some();
             if !rs_has_name && (rs_is_span || rs_val == 0) {
                 continue;
             } // not row-locked
@@ -855,7 +866,8 @@ pub fn layout_grid(
             // Check for row-locked (handled in step 2)
             let (rs_is_span, rs_val) = decode_grid_line(child.style.grid_row_start);
             let rs_has_name = !child.style.grid_row_start_name.is_empty()
-                && lookup_named_line(&child.style.grid_row_start_name, &row_line_names).is_some();
+                && lookup_placement_line(&child.style.grid_row_start_name, &row_line_names, false)
+                    .is_some();
             if !rs_is_span && rs_val != 0 {
                 continue;
             }
@@ -865,8 +877,12 @@ pub fn layout_grid(
             // Check if column IS explicitly set (via number or named line)
             let (cs_is_span, cs_val) = decode_grid_line(child.style.grid_column_start);
             let cs_has_name = !child.style.grid_column_start_name.is_empty()
-                && lookup_named_line(&child.style.grid_column_start_name, &col_line_names)
-                    .is_some();
+                && lookup_placement_line(
+                    &child.style.grid_column_start_name,
+                    &col_line_names,
+                    false,
+                )
+                .is_some();
             if !cs_has_name && (cs_is_span || cs_val == 0) {
                 continue;
             } // not column-locked
@@ -922,14 +938,16 @@ pub fn layout_grid(
         // Skip row-locked items (handled in step 2)
         let (rs_is_span2, rs_val2) = decode_grid_line(child.style.grid_row_start);
         let rs_has_name2 = !child.style.grid_row_start_name.is_empty()
-            && lookup_named_line(&child.style.grid_row_start_name, &row_line_names).is_some();
+            && lookup_placement_line(&child.style.grid_row_start_name, &row_line_names, false)
+                .is_some();
         if rs_has_name2 || (!rs_is_span2 && rs_val2 != 0) {
             continue;
         }
         // In column flow, column-locked items were placed in the preceding pass.
         let (cs_is_span2, cs_val2) = decode_grid_line(child.style.grid_column_start);
         let cs_has_name2 = !child.style.grid_column_start_name.is_empty()
-            && lookup_named_line(&child.style.grid_column_start_name, &col_line_names).is_some();
+            && lookup_placement_line(&child.style.grid_column_start_name, &col_line_names, false)
+                .is_some();
         let column_locked = cs_has_name2 || (!cs_is_span2 && cs_val2 != 0);
         if col_flow && column_locked {
             continue;
@@ -1093,6 +1111,7 @@ pub fn layout_grid(
             ch,
             font_px,
             root_font_px,
+            c.available_height,
         );
         layout_abs_children(engine, node, font_px, root_font_px, None);
         return result;
@@ -1156,53 +1175,97 @@ pub fn layout_grid(
             }
         }
     }
-    let mut col_spanning: Vec<(usize, usize, f32, f32)> = col_spans
+    let mut min_eligible = vec![true; n_measured_cols];
+    let mut max_eligible = vec![true; n_measured_cols];
+    for index in 0..n_measured_cols {
+        let track = col_tracks
+            .get(index)
+            .unwrap_or(&node.style.grid_auto_columns);
+        let (min_kind, min_value, min_calc, max_kind, max_value, max_calc) =
+            if track.kind == GridTrackKind::MinMax {
+                (
+                    track.min_kind,
+                    track.min_value,
+                    track.min_calc_length.as_ref(),
+                    track.max_kind,
+                    track.max_value,
+                    track.max_calc_length.as_ref(),
+                )
+            } else {
+                (
+                    track.kind,
+                    track.value,
+                    track.calc_length.as_ref(),
+                    track.kind,
+                    track.value,
+                    track.calc_length.as_ref(),
+                )
+            };
+        for (kind, value, calc, sizes, eligible) in [
+            (
+                min_kind,
+                min_value,
+                min_calc,
+                &mut col_min_widths,
+                &mut min_eligible,
+            ),
+            (
+                max_kind,
+                max_value,
+                max_calc,
+                &mut col_content_widths,
+                &mut max_eligible,
+            ),
+        ] {
+            if matches!(
+                kind,
+                GridTrackKind::Fixed | GridTrackKind::Percent | GridTrackKind::Calc
+            ) {
+                sizes[index] = resolve_track_component_px(
+                    kind,
+                    value,
+                    value,
+                    calc,
+                    content_w,
+                    font_px,
+                    root_font_px,
+                    0.0,
+                    0.0,
+                    track_lengths,
+                )
+                .max(0.0);
+                eligible[index] = false;
+            }
+        }
+        col_content_widths[index] = col_content_widths[index].max(col_min_widths[index]);
+    }
+    let mut col_spanning: Vec<(usize, usize, f32)> = col_spans
         .iter()
         .copied()
         .filter(|(cs, ce, _, _)| ce.saturating_sub(*cs) > 1)
+        .map(|(cs, ce, _, mx)| (cs, ce, mx))
         .collect();
-    // Smallest spans first, as the spec requires.
-    col_spanning.sort_by_key(|(cs, ce, _, _)| ce - cs);
-    for (cs, ce, mn, mx) in col_spanning {
-        if ce <= cs {
-            continue;
-        }
-        if span_only_flexible_tracks(&col_tracks, cs, ce) {
-            continue;
-        }
-        let n = ce - cs;
-        let gaps = col_gap * n.saturating_sub(1) as f32;
-        for (widths, want) in [(&mut col_content_widths, mx), (&mut col_min_widths, mn)] {
-            let already: f32 = widths[cs..ce].iter().sum::<f32>() + gaps;
-            let extra = want - already;
-            if extra <= 0.0 {
-                continue;
-            }
-            let flexible: Vec<usize> = (cs..ce)
-                .filter(|&c| {
-                    col_tracks
-                        .get(c)
-                        .map(|track| {
-                            track.kind == GridTrackKind::Fractional
-                                || (track.kind == GridTrackKind::MinMax
-                                    && track.max_kind == GridTrackKind::Fractional)
-                        })
-                        .unwrap_or(false)
-                })
-                .collect();
-            if !flexible.is_empty() {
-                let share = extra / flexible.len() as f32;
-                for c in flexible {
-                    widths[c] += share;
-                }
-            } else {
-                let share = extra / n as f32;
-                for c in cs..ce {
-                    widths[c] += share;
-                }
-            }
-        }
-    }
+    grow_spanning_contributions(
+        &mut col_content_widths,
+        &mut col_spanning,
+        col_gap,
+        Some(&col_tracks),
+        Some(&max_eligible),
+    );
+    col_spanning.clear();
+    col_spanning.extend(
+        col_spans
+            .iter()
+            .filter(|(cs, ce, _, _)| ce.saturating_sub(*cs) > 1)
+            .map(|&(cs, ce, mn, _)| (cs, ce, mn)),
+    );
+    grow_spanning_contributions(
+        &mut col_min_widths,
+        &mut col_spanning,
+        col_gap,
+        Some(&col_tracks),
+        Some(&min_eligible),
+    );
     // A track's min-content contribution can never exceed its max-content one.
     for c in 0..n_measured_cols {
         if col_min_widths[c] > col_content_widths[c] {
@@ -1342,39 +1405,88 @@ pub fn layout_grid(
     // a floor. That floor let one tall spanning item inflate every short track
     // it crossed: a 6810px sidebar pushed two ~40px rows to 1811px each.
     //
-    // Growth limits are not modelled, so the excess is shared equally rather
-    // than freezing tracks as they reach a limit.
-    for &(rs, re, h) in &row_spans {
+    let row_factors: Vec<f32> = (0..n_rows)
+        .map(|r| {
+            let track = row_tracks.get(r).unwrap_or(&node.style.grid_auto_rows);
+            match track.kind {
+                GridTrackKind::Fractional => track.value.max(0.0),
+                GridTrackKind::MinMax if track.max_kind == GridTrackKind::Fractional => {
+                    track.max_value.max(0.0)
+                }
+                _ => 0.0,
+            }
+        })
+        .collect();
+    let row_has_flex: Vec<bool> = (0..n_rows)
+        .map(|r| {
+            let track = row_tracks.get(r).unwrap_or(&node.style.grid_auto_rows);
+            track.kind == GridTrackKind::Fractional
+                || track.kind == GridTrackKind::MinMax
+                    && track.max_kind == GridTrackKind::Fractional
+        })
+        .collect();
+    let mut row_base_spans = row_spans.clone();
+    for (ii, (rs, re, h)) in row_base_spans.iter_mut().enumerate() {
+        if !row_has_flex[*rs..*re].iter().any(|flex| *flex) {
+            continue;
+        }
+        let (cs, ce, _, _) = placements[ii];
+        let cs = cs.min(n_cols_actual.saturating_sub(1));
+        let ce = ce.min(n_cols_actual).max(cs + 1);
+        let span_w = span_width(&col_px, &col_x, cs, ce, col_gap + extra_gap_col, content_w);
+        let track = row_tracks.get(*rs).unwrap_or(&node.style.grid_auto_rows);
+        let auto_min = track.kind == GridTrackKind::Fractional
+            || track.kind == GridTrackKind::MinMax && track.min_kind == GridTrackKind::Auto;
+        if track.kind == GridTrackKind::MinMax
+            && matches!(
+                track.min_kind,
+                GridTrackKind::MinContent | GridTrackKind::MaxContent
+            )
+        {
+            continue;
+        }
+        if track.kind == GridTrackKind::MinMax
+            && matches!(
+                track.min_kind,
+                GridTrackKind::Fixed | GridTrackKind::Percent | GridTrackKind::Calc
+            )
+            && *re - *rs == 1
+        {
+            *h = 0.0;
+            continue;
+        }
+        let child = grid_child_mut(node, &item_indices[ii]);
+        let child_font = child.style.font_size_px(font_px, root_font_px);
+        let crbox = engine.res_box(&child.style, child_font, span_w, root_font_px);
+        if crbox.content_height.is_some() {
+            continue;
+        }
+        let content_min = *re - *rs == 1
+            && auto_min
+            && matches!(child.style.overflow_y, Overflow::Visible | Overflow::Clip);
+        if child.style.min_height.is_auto() && content_min {
+            continue;
+        }
+        let minimum = engine.res_len(
+            &child.style.min_height,
+            child_font,
+            rbox.content_height.unwrap_or(0.0),
+            root_font_px,
+        );
+        let inner = if child.style.box_sizing == BoxSizing::BorderBox {
+            minimum.max(crbox.inner_v_space())
+        } else {
+            minimum + crbox.inner_v_space()
+        };
+        *h = inner + crbox.margin_top + crbox.margin_bottom;
+    }
+    for &(rs, re, h) in &row_base_spans {
         if re.saturating_sub(rs) <= 1 {
             if rs < n_rows && h > row_heights[rs] {
                 row_heights[rs] = h;
             }
         }
     }
-    let mut spanning: Vec<(usize, usize, f32)> = row_spans
-        .iter()
-        .copied()
-        .filter(|(rs, re, _)| re.saturating_sub(*rs) > 1)
-        .collect();
-    // Smallest spans first, as the spec requires.
-    spanning.sort_by_key(|(rs, re, _)| re - rs);
-    for (rs, re, h) in spanning {
-        if re <= rs {
-            continue;
-        }
-        let n = re - rs;
-        let already: f32 =
-            row_heights[rs..re].iter().sum::<f32>() + row_gap * n.saturating_sub(1) as f32;
-        let extra = h - already;
-        if extra <= 0.0 {
-            continue;
-        }
-        let share = extra / n as f32;
-        for r in rs..re {
-            row_heights[r] += share;
-        }
-    }
-
     // ── Baseline alignment groups (Box Alignment §9) ────────────────────────
     // The items whose row START is row R and whose `align-self` is a baseline
     // value share a baseline: each is pushed down by the group's largest ascent
@@ -1407,126 +1519,36 @@ pub fn layout_grid(
         }
     }
 
-    // ⛔ A ROW track's percentage resolves against the grid's HEIGHT, never its
-    // width (CSS Grid §7.2.3). When that height is indefinite the percentage
-    // contributes NOTHING and the track behaves as `auto`, which a 0 basis
-    // gives exactly. Passing the width here made `grid-template-rows: 50%` in
-    // an auto-height grid a fraction of the COLUMN measure.
-    let row_pct_basis = rbox.content_height.unwrap_or(0.0);
+    let cyclic_row_bases = (rbox.content_height.is_none()
+        && (0..n_rows).any(|row| {
+            track_contains_percentage(row_tracks.get(row).unwrap_or(&node.style.grid_auto_rows))
+        }))
+    .then(|| row_heights.clone());
+    let mut spanning: Vec<(usize, usize, f32)> = row_base_spans
+        .iter()
+        .copied()
+        .filter(|(rs, re, _)| re.saturating_sub(*rs) > 1)
+        .collect();
+    resolve_row_content_sizes(
+        &mut row_heights,
+        &mut spanning,
+        &row_tracks,
+        &node.style.grid_auto_rows,
+        rbox.content_height,
+        row_gap,
+        font_px,
+        root_font_px,
+        track_lengths,
+    );
 
-    // Apply explicit row track sizes where specified (with MinMax clamping)
-    for (ri, track) in row_tracks.iter().enumerate() {
-        if ri < row_heights.len() {
-            match track.kind {
-                GridTrackKind::MinMax => {
-                    let min_h = track_to_px_with_context(
-                        &grid_track_component(
-                            track.min_kind,
-                            track.min_value,
-                            track.min_calc_length.clone(),
-                        ),
-                        row_pct_basis,
-                        font_px,
-                        root_font_px,
-                        track_lengths,
-                    );
-                    let max_h = track_to_px_with_context(
-                        &grid_track_component(
-                            track.max_kind,
-                            track.max_value,
-                            track.max_calc_length.clone(),
-                        ),
-                        row_pct_basis,
-                        font_px,
-                        root_font_px,
-                        track_lengths,
-                    );
-                    let mut h = row_heights[ri].max(min_h);
-                    if max_h > 0.0 {
-                        h = h.min(max_h);
-                    }
-                    h = h.max(min_h);
-                    row_heights[ri] = h;
-                }
-                // ⛔ `fit-content(X)` is a CEILING, never a floor — and on the
-                // block axis it cannot cut into the content either, because the
-                // track's MIN sizing function is `auto`. Its min-content height
-                // is never below its max-content height, so the clamp has
-                // nothing left to bite: the row is its content height.
-                // `track_to_px` hands back X, and feeding that into the branch
-                // below FORCED a 50px row to `fit-content(200px)`.
-                GridTrackKind::FitContent => {}
-                _ => {
-                    let px = track_to_px_with_context(
-                        track,
-                        row_pct_basis,
-                        font_px,
-                        root_font_px,
-                        track_lengths,
-                    );
-                    if px > 0.0 {
-                        // Fixed/percent tracks set exact height; fr/auto use content
-                        match track.kind {
-                            GridTrackKind::Fixed | GridTrackKind::Percent | GridTrackKind::Calc => {
-                                row_heights[ri] = px;
-                            }
-                            _ => {
-                                if px > row_heights[ri] {
-                                    row_heights[ri] = px;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Apply grid-auto-rows to implicit rows (rows beyond the explicit row count)
-    {
-        let n_explicit_rows = node.style.rare().grid_template_rows.len();
-        let ar = &node.style.grid_auto_rows;
-        if ar.kind == GridTrackKind::MinMax {
-            // minmax(min, max): enforce min as floor, max as ceiling
-            let min_h = track_to_px_with_context(
-                &grid_track_component(ar.min_kind, ar.min_value, ar.min_calc_length.clone()),
-                row_pct_basis,
-                font_px,
-                root_font_px,
-                track_lengths,
-            );
-            let max_h = track_to_px_with_context(
-                &grid_track_component(ar.max_kind, ar.max_value, ar.max_calc_length.clone()),
-                row_pct_basis,
-                font_px,
-                root_font_px,
-                track_lengths,
-            );
-            for r in n_explicit_rows..n_rows {
-                let mut h = row_heights[r].max(min_h);
-                if max_h > 0.0 {
-                    h = h.min(max_h);
-                }
-                row_heights[r] = h.max(min_h);
-            }
-        } else if ar.kind == GridTrackKind::FitContent {
-            // `fit-content(X)` is a ceiling, not a floor — see the explicit
-            // row tracks above. `track_to_px` returns X, which would have
-            // forced every implicit row up to the limit.
-        } else {
-            let auto_h =
-                track_to_px_with_context(ar, row_pct_basis, font_px, root_font_px, track_lengths);
-            if auto_h > 0.0 {
-                for r in n_explicit_rows..n_rows {
-                    if auto_h > row_heights[r] {
-                        row_heights[r] = auto_h;
-                    }
-                }
-            }
-        }
-    }
-
-    // Distribute fr units and percentages for row tracks when container has explicit height
+    let row_factor_sum: f32 = row_factors.iter().sum();
+    let partial_flex_bases = (rbox.content_height.is_none()
+        && row_has_flex.iter().any(|flex| *flex)
+        && (row_factor_sum > 0.0 && row_factor_sum < 1.0
+            || height_limits.0 > 0.0
+            || height_limits.1.is_finite()))
+    .then(|| row_heights.clone());
+    // Expand flexible rows against definite space or intrinsic contributions.
     if let Some(container_h) = rbox.content_height {
         let total_gap = row_gap * n_rows.saturating_sub(1) as f32;
         // Resolve percentage rows
@@ -1535,26 +1557,28 @@ pub fn layout_grid(
                 row_heights[ri] = (track.value / 100.0 * container_h).max(0.0);
             }
         }
-        // Distribute fractional rows
-        let mut fr_total = 0.0f32;
-        let mut fixed_total = 0.0f32;
-        for (ri, track) in row_tracks.iter().enumerate() {
-            if ri < row_heights.len() {
-                if track.kind == GridTrackKind::Fractional {
-                    fr_total += track.value;
-                } else {
-                    fixed_total += row_heights[ri];
-                }
+        let fraction = find_fr_size(&row_heights, &row_factors, container_h - total_gap);
+        expand_fr_tracks(&mut row_heights, &row_factors, fraction);
+    } else if row_has_flex.iter().any(|flex| *flex) {
+        // Grid §12.7: indefinite space uses the largest fraction required by
+        // a flexible base or an item's max-content contribution, not equal rows.
+        let mut fraction = row_heights
+            .iter()
+            .zip(&row_factors)
+            .filter(|(_, factor)| **factor > 0.0)
+            .map(|(base, factor)| base / factor.max(1.0))
+            .fold(0.0_f32, f32::max);
+        for &(rs, re, height) in &row_spans {
+            if row_has_flex[rs..re].iter().any(|flex| *flex) {
+                let space = height - row_gap * (re - rs).saturating_sub(1) as f32;
+                fraction = fraction.max(find_fr_size(
+                    &row_heights[rs..re],
+                    &row_factors[rs..re],
+                    space,
+                ));
             }
         }
-        if fr_total > 0.0 {
-            let available = (container_h - fixed_total - total_gap).max(0.0);
-            for (ri, track) in row_tracks.iter().enumerate() {
-                if ri < row_heights.len() && track.kind == GridTrackKind::Fractional {
-                    row_heights[ri] = (available * track.value / fr_total).max(0.0);
-                }
-            }
-        }
+        expand_fr_tracks(&mut row_heights, &row_factors, fraction);
     }
 
     // CSS Grid §11.1 steps 2-3: the grid container's size is found first, with
@@ -1562,21 +1586,55 @@ pub fn layout_grid(
     // with the percentages resolved against that size. The container keeps the
     // size step 2 gave it, so a percentage row may overflow it — that is what
     // Chrome does with `grid-template-rows: 50% auto` in an auto-height grid.
-    let cyclic_pct_h = if rbox.content_height.is_none()
-        && row_tracks
-            .iter()
-            .take(n_rows)
-            .any(|t| t.kind == GridTrackKind::Percent)
-    {
-        Some(row_heights.iter().sum::<f32>() + row_gap * n_rows.saturating_sub(1) as f32)
+    let intrinsic_grid_height = if rbox.content_height.is_none() {
+        let natural = if node.style.contain_size || node.style.container_type == ContainerType::Size
+        {
+            engine.contained_intrinsic_height_for_node(node, font_px, root_font_px)
+        } else {
+            row_heights.iter().sum::<f32>() + row_gap * n_rows.saturating_sub(1) as f32
+        };
+        Some(natural.clamp(height_limits.0, height_limits.1))
     } else {
         None
     };
-    if let Some(basis) = cyclic_pct_h {
-        for (ri, track) in row_tracks.iter().enumerate() {
-            if ri < row_heights.len() && track.kind == GridTrackKind::Percent {
-                row_heights[ri] = (track.value / 100.0 * basis).max(0.0);
+    if let Some(basis) = intrinsic_grid_height {
+        if let Some(bases) = &cyclic_row_bases {
+            row_heights.copy_from_slice(bases);
+            resolve_row_content_sizes(
+                &mut row_heights,
+                &mut spanning,
+                &row_tracks,
+                &node.style.grid_auto_rows,
+                Some(basis),
+                row_gap,
+                font_px,
+                root_font_px,
+                track_lengths,
+            );
+        }
+        // Intrinsic sizing establishes the auto container's height first.
+        // Fraction sums below one then consume only that fraction of its
+        // available height; retain the intrinsic container size, like percentages.
+        if let Some(mut bases) = partial_flex_bases {
+            for r in 0..n_rows {
+                if cyclic_row_bases.is_some() || !row_has_flex[r] {
+                    bases[r] = row_heights[r];
+                }
             }
+            let fraction = find_fr_size(
+                &bases,
+                &row_factors,
+                basis - row_gap * n_rows.saturating_sub(1) as f32,
+            );
+            expand_fr_tracks(&mut bases, &row_factors, fraction);
+            row_heights = bases;
+        } else if cyclic_row_bases.is_some() && row_has_flex.iter().any(|flex| *flex) {
+            let fraction = find_fr_size(
+                &row_heights,
+                &row_factors,
+                basis - row_gap * n_rows.saturating_sub(1) as f32,
+            );
+            expand_fr_tracks(&mut row_heights, &row_factors, fraction);
         }
     }
 
@@ -1587,7 +1645,7 @@ pub fn layout_grid(
     // default: without it a `height:400px` grid with two auto rows left them at
     // content height and wasted the rest of the box.
     if node.style.align_content == AlignContent::Stretch {
-        if let Some(container_h) = rbox.content_height {
+        if let Some(container_h) = rbox.content_height.or(intrinsic_grid_height) {
             let n_explicit_rows = row_tracks.len();
             let auto_rows: Vec<usize> = (0..n_rows)
                 .filter(|&r| {
@@ -1616,7 +1674,10 @@ pub fn layout_grid(
     // align-content: compute extra vertical space distribution
     let grid_total_h: f32 =
         row_heights.iter().sum::<f32>() + row_gap * n_rows.saturating_sub(1) as f32;
-    let container_h = rbox.content_height.unwrap_or(grid_total_h);
+    let container_h = rbox
+        .content_height
+        .or(intrinsic_grid_height)
+        .unwrap_or(grid_total_h);
     let extra_y = (container_h - grid_total_h).max(0.0);
     let (grid_offset_y, extra_gap_row) =
         compute_align_content(node.style.align_content, extra_y, n_rows);
@@ -1847,7 +1908,7 @@ pub fn layout_grid(
 
     let ch = rbox
         .content_height
-        .unwrap_or(cyclic_pct_h.unwrap_or(total_h));
+        .unwrap_or(intrinsic_grid_height.unwrap_or(total_h));
 
     // Collapsed margins: no pass-through
     node.layout.collapsed_margin_top = rbox.margin_top;
@@ -1864,6 +1925,7 @@ pub fn layout_grid(
         ch,
         font_px,
         root_font_px,
+        c.available_height,
     );
     layout_abs_children(
         engine,
@@ -1911,6 +1973,29 @@ fn build_area_map(
     map
 }
 
+fn placement_line_names(
+    style: &ComputedStyle,
+    areas: &std::collections::HashMap<String, (usize, usize, usize, usize)>,
+) -> (
+    std::collections::HashMap<String, Vec<usize>>,
+    std::collections::HashMap<String, Vec<usize>>,
+) {
+    let mut columns = style.grid_col_line_names.clone();
+    let mut rows = style.grid_row_line_names.clone();
+    for (name, &(cs, ce, rs, re)) in areas {
+        for (suffix, col, row) in [("-start", cs, rs), ("-end", ce, re)] {
+            let line_name = format!("{name}{suffix}");
+            for (names, index) in [(&mut columns, col), (&mut rows, row)] {
+                let indices = names.entry(line_name.clone()).or_default();
+                indices.push(index);
+                indices.sort_unstable();
+                indices.dedup();
+            }
+        }
+    }
+    (columns, rows)
+}
+
 /// Decode a grid line value from parse_grid_line encoding.
 /// Returns (is_span, value) where:
 ///   is_span=true, value=N  means "span N"
@@ -1933,10 +2018,15 @@ fn lookup_named_line(
     if name.is_empty() {
         return None;
     }
-    if let Some((line_name, ordinal)) = name.rsplit_once(char::is_whitespace) {
-        if let Ok(n) = ordinal.trim().parse::<isize>() {
+    if let Some((first, last)) = name.split_once(char::is_whitespace) {
+        let numbered = last
+            .trim()
+            .parse::<isize>()
+            .map(|n| (first, n))
+            .or_else(|_| first.parse::<isize>().map(|n| (last.trim(), n)));
+        if let Ok((line_name, n)) = numbered {
             if n != 0 {
-                if let Some(indices) = line_names.get(line_name.trim()) {
+                if let Some(indices) = line_names.get(line_name) {
                     return if n > 0 {
                         indices.get(n as usize - 1).copied()
                     } else {
@@ -1952,6 +2042,22 @@ fn lookup_named_line(
         return indices.first().copied();
     }
     None
+}
+
+fn lookup_placement_line(
+    name: &str,
+    line_names: &std::collections::HashMap<String, Vec<usize>>,
+    is_end: bool,
+) -> Option<usize> {
+    // Grid 1 section 8.3: only a bare identifier tries its area edge first.
+    // Numbered names count the authored name, even when area edges exist.
+    if !name.is_empty() && !name.chars().any(char::is_whitespace) {
+        let suffix = if is_end { "-end" } else { "-start" };
+        if let Some(index) = lookup_named_line(&format!("{name}{suffix}"), line_names) {
+            return Some(index);
+        }
+    }
+    lookup_named_line(name, line_names)
 }
 
 fn set_grid_item_inline_extent(child: &mut WebCore, target_margin_box_w: f32, rbox: &ResolvedBox) {
@@ -1987,7 +2093,7 @@ fn resolve_line_start_named(
 ) -> usize {
     // Try named line first if numeric is auto
     if raw == 0 && !name.is_empty() {
-        if let Some(idx) = lookup_named_line(name, line_names) {
+        if let Some(idx) = lookup_placement_line(name, line_names, false) {
             return idx;
         }
     }
@@ -2020,7 +2126,7 @@ fn resolve_line_end_named(
 ) -> usize {
     // Try named line first if numeric is auto
     if raw == 0 && !name.is_empty() {
-        if let Some(idx) = lookup_named_line(name, line_names) {
+        if let Some(idx) = lookup_placement_line(name, line_names, true) {
             return idx.max(start + 1);
         }
     }
@@ -2029,39 +2135,45 @@ fn resolve_line_end_named(
 
 fn is_explicitly_placed(
     child: &WebCore,
-    area_map: &std::collections::HashMap<String, (usize, usize, usize, usize)>,
+    _area_map: &std::collections::HashMap<String, (usize, usize, usize, usize)>,
     col_line_names: &std::collections::HashMap<String, Vec<usize>>,
     row_line_names: &std::collections::HashMap<String, Vec<usize>>,
 ) -> bool {
-    if !child.style.grid_area.is_empty() && area_map.contains_key(&child.style.grid_area) {
-        return true;
+    if !child.style.grid_area.is_empty() {
+        return lookup_placement_line(&child.style.grid_area, col_line_names, false).is_some()
+            && lookup_placement_line(&child.style.grid_area, row_line_names, false).is_some();
     }
     let (cs_span, cs_val) = decode_grid_line(child.style.grid_column_start);
     let (rs_span, rs_val) = decode_grid_line(child.style.grid_row_start);
     // Column is definite if it has a numeric value OR a resolvable named line
     let col_definite = (!cs_span && cs_val != 0)
         || (!child.style.grid_column_start_name.is_empty()
-            && lookup_named_line(&child.style.grid_column_start_name, col_line_names).is_some());
+            && lookup_placement_line(&child.style.grid_column_start_name, col_line_names, false)
+                .is_some());
     let row_definite = (!rs_span && rs_val != 0)
         || (!child.style.grid_row_start_name.is_empty()
-            && lookup_named_line(&child.style.grid_row_start_name, row_line_names).is_some());
+            && lookup_placement_line(&child.style.grid_row_start_name, row_line_names, false)
+                .is_some());
     col_definite && row_definite
 }
 
 /// Resolve placement to (col_start, col_end, row_start, row_end), all 0-based.
 fn resolve_placement(
     child: &WebCore,
-    area_map: &std::collections::HashMap<String, (usize, usize, usize, usize)>,
+    _area_map: &std::collections::HashMap<String, (usize, usize, usize, usize)>,
     n_cols: usize,
     n_rows: usize,
     col_line_names: &std::collections::HashMap<String, Vec<usize>>,
     row_line_names: &std::collections::HashMap<String, Vec<usize>>,
 ) -> (usize, usize, usize, usize) {
-    // Named grid area
+    // A bare grid-area uses the same edge-name precedence as the longhands.
     if !child.style.grid_area.is_empty() {
-        if let Some(&(cs, ce, rs, re)) = area_map.get(&child.style.grid_area) {
-            return (cs, ce, rs, re);
-        }
+        let name = &child.style.grid_area;
+        let cs = resolve_line_start_named(0, name, n_cols, col_line_names);
+        let ce = resolve_line_end_named(0, name, cs, n_cols, col_line_names);
+        let rs = resolve_line_start_named(0, name, n_rows, row_line_names);
+        let re = resolve_line_end_named(0, name, rs, n_rows, row_line_names);
+        return (cs, ce, rs, re);
     }
 
     let cs = resolve_line_start_named(
@@ -2405,15 +2517,258 @@ fn span_only_flexible_tracks(tracks: &[GridTrackSize], start: usize, end: usize)
     })
 }
 
-/// Resolve a track list to pixel sizes, running the CSS Grid track sizing
-/// algorithm in the order the spec gives it: initialize base sizes and growth
-/// limits (§12.4/§12.5), Maximize Tracks (§12.6), Expand Flexible Tracks
-/// (§12.8), Stretch auto Tracks (§12.7).
-///
-/// `content_widths` is the MAX-content contribution per track, `min_widths` the
-/// MIN-content one. A track needs both: they are the two ends of its base size
-/// and growth limit, and using max-content for both makes `min-content` a
-/// synonym for `max-content`.
+fn track_contains_percentage(track: &GridTrackSize) -> bool {
+    track.kind == GridTrackKind::Percent
+        || track
+            .calc_length
+            .as_ref()
+            .is_some_and(CssLength::has_percentage)
+        || track.min_kind == GridTrackKind::Percent
+        || track.max_kind == GridTrackKind::Percent
+        || track
+            .min_calc_length
+            .as_ref()
+            .is_some_and(CssLength::has_percentage)
+        || track
+            .max_calc_length
+            .as_ref()
+            .is_some_and(CssLength::has_percentage)
+}
+
+fn resolve_row_content_sizes(
+    sizes: &mut [f32],
+    spans: &mut [(usize, usize, f32)],
+    tracks: &[GridTrackSize],
+    auto_track: &GridTrackSize,
+    basis: Option<f32>,
+    gap: f32,
+    font_px: f32,
+    root_font_px: f32,
+    lengths: GridTrackLengthContext,
+) {
+    let resolve_fixed = |kind, value, calc: Option<&CssLength>| {
+        let fixed = match kind {
+            GridTrackKind::Fixed => true,
+            GridTrackKind::Percent => basis.is_some(),
+            GridTrackKind::Calc => basis.is_some() || !calc.is_some_and(CssLength::has_percentage),
+            _ => false,
+        };
+        fixed.then(|| {
+            resolve_track_component_px(
+                kind,
+                value,
+                value,
+                calc,
+                basis.unwrap_or(0.0),
+                font_px,
+                root_font_px,
+                0.0,
+                0.0,
+                lengths,
+            )
+            .max(0.0)
+        })
+    };
+    let mut limits = vec![f32::INFINITY; sizes.len()];
+    let eligible: Vec<bool> = sizes
+        .iter_mut()
+        .enumerate()
+        .map(|(index, size)| {
+            let track = tracks.get(index).unwrap_or(auto_track);
+            if track.kind == GridTrackKind::MinMax {
+                let minimum = resolve_fixed(
+                    track.min_kind,
+                    track.min_value,
+                    track.min_calc_length.as_ref(),
+                );
+                let maximum = resolve_fixed(
+                    track.max_kind,
+                    track.max_value,
+                    track.max_calc_length.as_ref(),
+                );
+                if let Some(minimum) = minimum {
+                    *size = if maximum.is_some() || track.max_kind == GridTrackKind::Fractional {
+                        minimum
+                    } else {
+                        size.max(minimum)
+                    };
+                }
+                if let Some(maximum) = maximum {
+                    limits[index] = maximum.max(minimum.unwrap_or(0.0));
+                    *size = size.min(limits[index]);
+                }
+                return minimum.is_none();
+            }
+            if let Some(fixed) = resolve_fixed(track.kind, track.value, track.calc_length.as_ref())
+            {
+                *size = fixed;
+                limits[index] = fixed;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    grow_spanning_contributions_limited(sizes, spans, gap, None, Some(&eligible), Some(&limits));
+    // In indefinite space, maximizing a non-flexible track uses its finite
+    // growth limit, after spanning contributions have established base sizes.
+    if basis.is_none() {
+        for (size, limit) in sizes.iter_mut().zip(&limits) {
+            if limit.is_finite() {
+                *size = size.max(*limit);
+            }
+        }
+    } else if let Some(container) = basis {
+        for (size, limit) in sizes.iter().zip(&mut limits) {
+            if !limit.is_finite() {
+                *limit = *size;
+            }
+        }
+        let free =
+            container - gap * sizes.len().saturating_sub(1) as f32 - sizes.iter().sum::<f32>();
+        maximize_track_sizes(sizes, &limits, free);
+    }
+}
+
+fn maximize_track_sizes(base: &mut [f32], limits: &[f32], mut free: f32) {
+    let mut open: Vec<usize> = (0..base.len()).filter(|&i| limits[i] > base[i]).collect();
+    while free > 0.01 && !open.is_empty() {
+        let share = free / open.len() as f32;
+        let count = open.len();
+        let mut used = 0.0;
+        open.retain(|&i| {
+            let room = limits[i] - base[i];
+            let increase = room.min(share);
+            base[i] += increase;
+            used += increase;
+            room > share
+        });
+        free -= used;
+        if open.len() == count {
+            break;
+        }
+    }
+}
+
+/// Commit equal-span planned increases together, with axis-specific eligibility.
+fn grow_spanning_contributions(
+    sizes: &mut [f32],
+    spans: &mut [(usize, usize, f32)],
+    gap: f32,
+    tracks: Option<&[GridTrackSize]>,
+    eligible: Option<&[bool]>,
+) {
+    grow_spanning_contributions_limited(sizes, spans, gap, tracks, eligible, None);
+}
+
+fn grow_spanning_contributions_limited(
+    sizes: &mut [f32],
+    spans: &mut [(usize, usize, f32)],
+    gap: f32,
+    tracks: Option<&[GridTrackSize]>,
+    eligible: Option<&[bool]>,
+    limits: Option<&[f32]>,
+) {
+    spans.sort_by_key(|&(start, end, _)| end - start);
+    let mut planned = vec![0.0f32; sizes.len()];
+    let mut increases = vec![0.0f32; if limits.is_some() { sizes.len() } else { 0 }];
+    let mut first = 0;
+    while first < spans.len() {
+        let span = spans[first].1 - spans[first].0;
+        let mut end_group = first + 1;
+        while end_group < spans.len() && spans[end_group].1 - spans[end_group].0 == span {
+            end_group += 1;
+        }
+        planned.fill(0.0);
+        // Grid §12.5: equal-span items see the same affected sizes. Commit
+        // their per-track maximum increases only after the whole group.
+        for &(start, end, want) in &spans[first..end_group] {
+            if end <= start || end > sizes.len() {
+                continue;
+            }
+            if tracks.is_some_and(|tracks| span_only_flexible_tracks(tracks, start, end)) {
+                continue;
+            }
+            let extra =
+                (want - sizes[start..end].iter().sum::<f32>() - gap * (span - 1) as f32).max(0.0);
+            let is_flexible = |index: usize| {
+                tracks
+                    .and_then(|tracks| tracks.get(index))
+                    .is_some_and(|track| {
+                        track.kind == GridTrackKind::Fractional
+                            || (track.kind == GridTrackKind::MinMax
+                                && track.max_kind == GridTrackKind::Fractional)
+                    })
+            };
+            let is_eligible = |index: usize| eligible.is_none_or(|eligible| eligible[index]);
+            let flexible_count = (start..end)
+                .filter(|&index| is_eligible(index) && is_flexible(index))
+                .count();
+            let eligible_count = (start..end).filter(|&index| is_eligible(index)).count();
+            if eligible_count == 0 {
+                continue;
+            }
+            if limits.is_none() {
+                let share = extra
+                    / if flexible_count > 0 {
+                        flexible_count
+                    } else {
+                        eligible_count
+                    } as f32;
+                for index in start..end {
+                    if is_eligible(index) && (flexible_count == 0 || is_flexible(index)) {
+                        planned[index] = planned[index].max(share);
+                    }
+                }
+                continue;
+            }
+            increases[start..end].fill(0.0);
+            let selected =
+                |index| is_eligible(index) && (flexible_count == 0 || is_flexible(index));
+            let capacity = |index: usize, increase: f32| {
+                (limits.map_or(f32::INFINITY, |limits| limits[index]) - sizes[index] - increase)
+                    .max(0.0)
+            };
+            let mut remaining = extra;
+            loop {
+                let count = (start..end)
+                    .filter(|&index| selected(index) && capacity(index, increases[index]) > 0.0)
+                    .count();
+                if count == 0 || remaining <= 0.0 {
+                    break;
+                }
+                let share = remaining / count as f32;
+                let mut distributed = 0.0;
+                for index in start..end {
+                    if selected(index) {
+                        let increase = share.min(capacity(index, increases[index]));
+                        increases[index] += increase;
+                        distributed += increase;
+                    }
+                }
+                if distributed <= 0.0 {
+                    break;
+                }
+                remaining = (remaining - distributed).max(0.0);
+                if distributed >= share * count as f32 {
+                    break;
+                }
+            }
+            for index in start..end {
+                if selected(index) {
+                    planned[index] = planned[index].max(increases[index]);
+                }
+            }
+        }
+        for (size, increase) in sizes.iter_mut().zip(&planned) {
+            *size += increase;
+        }
+        first = end_group;
+    }
+}
+
+/// Resolve initialized intrinsic contributions, then maximize tracks, expand
+/// flexible tracks, and stretch automatic tracks.
 fn resolve_to_pixels(
     tracks: &[GridTrackSize],
     auto_cols: &GridTrackSize,
@@ -2433,7 +2788,6 @@ fn resolve_to_pixels(
     // Per-track sizing state.
     let mut base = vec![0.0f32; effective_n];
     let mut limit = vec![0.0f32; effective_n];
-    let mut is_fr = vec![false; effective_n];
     let mut fr_value = vec![0.0f32; effective_n];
     // A track only takes part in §12.7 "Stretch auto Tracks" when its MAX
     // sizing function is `auto` — a `min-content` or `max-content` track
@@ -2442,7 +2796,6 @@ fn resolve_to_pixels(
     // Tracks Maximize (§12.6) may grow: everything whose growth limit exceeds
     // its base and that is not flexible (a flexible track's growth limit IS
     // its base size, so it is frozen from the start).
-    let mut growable = vec![false; effective_n];
 
     let pct = |v: f32| v / 100.0 * container;
 
@@ -2463,7 +2816,6 @@ fn resolve_to_pixels(
                 base[i] = mn;
                 limit[i] = mx;
                 max_is_auto[i] = true;
-                growable[i] = true;
                 continue;
             }
         };
@@ -2488,7 +2840,6 @@ fn resolve_to_pixels(
             // `<flex>` is shorthand for `minmax(auto, <flex>)`: the base comes
             // from the content, the growth limit equals the base.
             GridTrackKind::Fractional => {
-                is_fr[i] = true;
                 fr_value[i] = t.value;
                 base[i] = mn;
                 limit[i] = mn;
@@ -2497,7 +2848,6 @@ fn resolve_to_pixels(
                 base[i] = mn;
                 limit[i] = mx;
                 max_is_auto[i] = true;
-                growable[i] = true;
             }
             GridTrackKind::MinContent => {
                 base[i] = mn;
@@ -2524,7 +2874,6 @@ fn resolve_to_pixels(
                 );
                 base[i] = mn;
                 limit[i] = mx.min(clamp.max(mn));
-                growable[i] = true;
             }
             GridTrackKind::MinMax => {
                 base[i] = resolve_track_component_px(
@@ -2540,7 +2889,6 @@ fn resolve_to_pixels(
                     lengths,
                 );
                 if t.max_kind == GridTrackKind::Fractional {
-                    is_fr[i] = true;
                     fr_value[i] = t.max_value;
                     limit[i] = base[i];
                 } else {
@@ -2563,7 +2911,6 @@ fn resolve_to_pixels(
                     if t.max_kind == GridTrackKind::Auto {
                         max_is_auto[i] = true;
                     }
-                    growable[i] = true;
                 }
             }
         }
@@ -2580,31 +2927,8 @@ fn resolve_to_pixels(
     // as it reaches its growth limit and continuing to grow the rest. One flat
     // share per track stretched a small `auto` column past its max-content
     // while a large sibling still needed room.
-    let mut free = container - total_gap - base.iter().sum::<f32>();
-    let mut open: Vec<usize> = (0..effective_n)
-        .filter(|&i| growable[i] && !is_fr[i] && limit[i] > base[i])
-        .collect();
-    while free > 0.01 && !open.is_empty() {
-        let share = free / open.len() as f32;
-        let mut still_open = Vec::with_capacity(open.len());
-        let mut used = 0.0f32;
-        for &i in &open {
-            let room = limit[i] - base[i];
-            if room <= share {
-                base[i] = limit[i];
-                used += room;
-            } else {
-                base[i] += share;
-                used += share;
-                still_open.push(i);
-            }
-        }
-        free -= used;
-        if still_open.len() == open.len() {
-            break;
-        } // everyone took a full share
-        open = still_open;
-    }
+    let free = container - total_gap - base.iter().sum::<f32>();
+    maximize_track_sizes(&mut base, &limit, free);
 
     // ── §12.8 Expand Flexible Tracks ─────────────────────────────────────────
     // ⛔ The leftover space for `fr` excludes the base sizes of the FLEXIBLE
@@ -2612,25 +2936,8 @@ fn resolve_to_pixels(
     // that track twice — once as free space and again as an fr share — so
     // `minmax(50px,1fr) 1fr` in a 300px grid gave 125 where Chrome gives 150,
     // and `repeat(auto-fill, minmax(80px,1fr))` never grew past 80.
-    let total_fr: f32 = (0..effective_n)
-        .filter(|&i| is_fr[i])
-        .map(|i| fr_value[i])
-        .sum();
-    if total_fr > 0.0 {
-        let non_flex: f32 = (0..effective_n)
-            .filter(|&i| !is_fr[i])
-            .map(|i| base[i])
-            .sum();
-        let leftover = (container - total_gap - non_flex).max(0.0);
-        for i in 0..effective_n {
-            if is_fr[i] {
-                let fr_w = leftover * fr_value[i] / total_fr;
-                if fr_w > base[i] {
-                    base[i] = fr_w;
-                }
-            }
-        }
-    }
+    let fraction = find_fr_size(&base, &fr_value, container - total_gap);
+    expand_fr_tracks(&mut base, &fr_value, fraction);
 
     // ── §12.7 Stretch auto Tracks ────────────────────────────────────────────
     // The remaining definite free space is divided equally among the tracks
@@ -2656,6 +2963,43 @@ fn resolve_to_pixels(
         }
     }
     base
+}
+
+/// CSS Grid's "find the size of an fr", shared by both axes. Zero factors
+/// retain their base; factors below one leave the specified fraction unfilled.
+fn find_fr_size(base: &[f32], factors: &[f32], space: f32) -> f32 {
+    if !factors.iter().any(|factor| *factor > 0.0) {
+        return 0.0;
+    }
+    let mut flexible: Vec<bool> = factors.iter().map(|factor| *factor > 0.0).collect();
+    loop {
+        let mut leftover = space;
+        let mut sum = 0.0;
+        for i in 0..base.len() {
+            if flexible[i] {
+                sum += factors[i];
+            } else {
+                leftover -= base[i];
+            }
+        }
+        let fraction = leftover.max(0.0) / sum.max(1.0);
+        let mut froze = false;
+        for i in 0..base.len() {
+            if flexible[i] && fraction * factors[i] < base[i] {
+                flexible[i] = false;
+                froze = true;
+            }
+        }
+        if !froze {
+            return fraction;
+        }
+    }
+}
+
+fn expand_fr_tracks(base: &mut [f32], factors: &[f32], fraction: f32) {
+    for (base, factor) in base.iter_mut().zip(factors) {
+        *base = base.max(fraction * factor);
+    }
 }
 
 fn resolve_track_component_px(
@@ -2818,6 +3162,7 @@ fn finish_grid(
     content_h: f32,
     font_px: f32,
     root_font_px: f32,
+    height_basis: Option<f32>,
 ) -> f32 {
     let ch = rbox.content_height.unwrap_or_else(|| {
         if node.style.contain_size || node.style.container_type == ContainerType::Size {
@@ -2826,6 +3171,14 @@ fn finish_grid(
             content_h
         }
     });
+    let (minimum, maximum) = engine.resolved_content_height_limits(
+        &node.style,
+        rbox,
+        height_basis,
+        font_px,
+        root_font_px,
+    );
+    let ch = ch.clamp(minimum, maximum);
     node.layout.content_rect = Rect::new(content_x, content_y, content_w, ch);
     node.layout.padding_rect = Rect::new(
         content_x - rbox.padding_left,
@@ -2894,17 +3247,16 @@ fn layout_abs_children(
             matches!(c.style.position, Position::Absolute | Position::Fixed)
         })
         .collect();
+    if abs_paths.is_empty() {
+        return;
+    }
     let area_map = build_area_map(&node.style.rare().grid_template_areas);
+    let (col_line_names, row_line_names) = placement_line_names(&node.style, &area_map);
     for path in abs_paths {
         let area_rect = areas.as_ref().and_then(|tracks| {
             let child = grid_child_ref(node, &path);
             if child.style.position != Position::Absolute
-                || !is_explicitly_placed(
-                    child,
-                    &area_map,
-                    &node.style.grid_col_line_names,
-                    &node.style.grid_row_line_names,
-                )
+                || !is_explicitly_placed(child, &area_map, &col_line_names, &row_line_names)
             {
                 return None;
             }
@@ -2913,8 +3265,8 @@ fn layout_abs_children(
                 &area_map,
                 tracks.col_w.len(),
                 tracks.row_h.len(),
-                &node.style.grid_col_line_names,
-                &node.style.grid_row_line_names,
+                &col_line_names,
+                &row_line_names,
             );
             if cs >= ce || rs >= re || ce > tracks.col_w.len() || re > tracks.row_h.len() {
                 return None;
@@ -2998,128 +3350,40 @@ fn compute_align_content(ac: AlignContent, extra: f32, n: usize) -> (f32, f32) {
     }
 }
 
-// ─── Old parse_track_sizes kept for backward compat ──────────────────────────
-
-/// Parse grid-template-columns / grid-template-rows into pixel sizes (legacy string API).
-/// Used by table.rs and any remaining callers.
+/// Document-independent compatibility API using the typed parser and shared
+/// sizing algorithm. Intrinsic contributions and viewport units need an owner.
 pub fn parse_track_sizes(
     template: &str,
     container: f32,
     font_px: f32,
     root_font_px: f32,
 ) -> Vec<f32> {
-    if template.is_empty() {
-        return Vec::new();
-    }
-
-    let expanded = expand_repeat(template, container);
-    let mut sizes = Vec::new();
-    let mut fr_indices: Vec<usize> = Vec::new();
-    let mut fr_values: Vec<f32> = Vec::new();
-    let mut used = 0.0f32;
-
-    for token in expanded.split_whitespace() {
-        let token = token.trim_matches(|c: char| c == '(' || c == ')');
-        if token.ends_with("fr") {
-            let fr: f32 = token[..token.len() - 2].parse().unwrap_or(1.0);
-            fr_indices.push(sizes.len());
-            fr_values.push(fr);
-            sizes.push(0.0);
-        } else if token.ends_with("px") {
-            let px: f32 = token[..token.len() - 2].parse().unwrap_or(0.0);
-            used += px;
-            sizes.push(px);
-        } else if token.ends_with('%') {
-            let pct: f32 = token[..token.len() - 1].parse().unwrap_or(0.0);
-            let px = pct / 100.0 * container;
-            used += px;
-            sizes.push(px);
-        } else if token.starts_with("minmax") {
-            let inner = token
-                .trim_start_matches("minmax")
-                .trim_matches(|c: char| c == '(' || c == ')');
-            let parts: Vec<&str> = inner.splitn(2, ',').collect();
-            if let Some(max_part) = parts.get(1) {
-                let p = max_part.trim();
-                if p.ends_with("fr") {
-                    let fr: f32 = p[..p.len() - 2].parse().unwrap_or(1.0);
-                    fr_indices.push(sizes.len());
-                    fr_values.push(fr);
-                    sizes.push(0.0);
-                } else {
-                    let px = crate::css::parse_length(p).resolve(font_px, container, root_font_px);
-                    used += px;
-                    sizes.push(px);
-                }
-            }
-        } else if token == "auto" {
-            sizes.push(0.0);
-        }
-    }
-
-    if !fr_indices.is_empty() {
-        let remaining = (container - used).max(0.0);
-        let total_fr: f32 = fr_values.iter().sum();
-        for (ii, &idx) in fr_indices.iter().enumerate() {
-            sizes[idx] = remaining * fr_values[ii] / total_fr;
-        }
-    }
-
-    sizes
-}
-
-fn expand_repeat(template: &str, container: f32) -> String {
-    if !template.contains("repeat") {
-        return template.to_string();
-    }
-
-    let mut out = String::new();
-    let mut rest = template;
-    while let Some(start) = rest.find("repeat(") {
-        out.push_str(&rest[..start]);
-        let inner_start = start + 7;
-        let mut depth = 1;
-        let mut end = inner_start;
-        let bytes = rest.as_bytes();
-        while end < bytes.len() {
-            if bytes[end] == b'(' {
-                depth += 1;
-            }
-            if bytes[end] == b')' {
-                depth -= 1;
-                if depth == 0 {
-                    break;
-                }
-            }
-            end += 1;
-        }
-        let inner = &rest[inner_start..end];
-        let comma_pos = inner.find(',').unwrap_or(0);
-        let count_str = inner[..comma_pos].trim();
-        let track_str = inner[comma_pos + 1..].trim();
-
-        let count = if count_str == "auto-fill" || count_str == "auto-fit" {
-            let ts = crate::css::parse_length(track_str)
-                .resolve(16.0, container, 16.0)
-                .max(1.0);
-            (container / ts) as usize
-        } else if let Ok(n) = count_str.parse::<usize>() {
-            n
-        } else {
-            // Handle calc() in repeat count, e.g. repeat(calc(5 - 1), ...)
-            let resolved = crate::css::parse_length(count_str).resolve(16.0, container, 16.0);
-            if resolved > 0.0 { resolved as usize } else { 1 }
-        };
-
-        for i in 0..count {
-            if i > 0 {
-                out.push(' ');
-            }
-            out.push_str(track_str);
-        }
-
-        rest = &rest[end + 1..];
-    }
-    out.push_str(rest);
-    out
+    let mut auto_repeat = Vec::new();
+    let tracks = crate::css::parse_track_list(template, &mut auto_repeat);
+    let lengths = GridTrackLengthContext {
+        query: QueryContainerSizes::default(),
+        viewport_w: 0.0,
+        viewport_h: 0.0,
+    };
+    let tracks = resolve_track_sizes(
+        &tracks,
+        &auto_repeat,
+        container,
+        font_px,
+        root_font_px,
+        lengths,
+    );
+    resolve_to_pixels(
+        &tracks,
+        &GridTrackSize::auto(),
+        container,
+        0.0,
+        tracks.len(),
+        font_px,
+        root_font_px,
+        &[],
+        &[],
+        lengths,
+        false,
+    )
 }

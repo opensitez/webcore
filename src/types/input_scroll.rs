@@ -67,6 +67,9 @@ impl Document {
         viewport_h: f32,
     ) -> bool {
         use crate::dom::HtmlEventType::*;
+        if self.open_select != 0 {
+            return false;
+        }
         let sbw = self.root.style.scrollbar_width_px();
 
         if let Some(drag) = self.resize_drag.clone() {
@@ -292,6 +295,15 @@ impl Document {
         delta_x: f32,
         delta_y: f32,
     ) -> bool {
+        if let Some(popup) = self.select_popup() {
+            if popup.contains(doc_pt) {
+                let next = (popup.scroll - delta_y).clamp(0.0, popup.max_scroll);
+                let changed = next != popup.scroll;
+                self.dropdown_scroll = next;
+                self.dropdown_hover_idx = -1;
+                return changed;
+            }
+        }
         let snap_context = ScrollSnapContext {
             viewport_w: self.viewport_w,
             viewport_h: self.viewport_h,

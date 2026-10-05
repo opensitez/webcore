@@ -22,6 +22,111 @@ fn build(html: &str) -> (EngineFrame, DisplayList) {
 }
 
 #[test]
+fn positioned_inline_icon_backing_uses_own_font_box_not_descendant_bounds() {
+    let mut renderer = Renderer::new();
+    let (ascent, descent, _) =
+        crate::layout::inline_layout::font_metrics(Some(&mut renderer.font_system), "Arial", 20.0);
+    for (child, line_height) in [
+        ("<span style='font-size:10px'>F</span>", 8),
+        ("<span style='font-size:20px'>F</span>", 20),
+        (
+            "<svg width='20' height='20' style='position:relative;top:1px'><rect width='20' height='20'/></svg>",
+            20,
+        ),
+        (
+            "<span style='display:inline-block;width:20px;height:40px'></span>",
+            36,
+        ),
+    ] {
+        let markup = format!(
+            "<style>body{{margin:0;font:20px/{line_height}px Arial}}#icon{{position:relative}}#back{{position:absolute;top:4px;left:8px;width:12.8px;height:15.2px;background:white}}</style><div id='line'><i id='icon'>{child}<span id='back'></span></i></div>"
+        );
+        let doc = renderer.load_html(&markup, 200.0);
+        let icon = doc
+            .get_box_by_id(doc.get_element_by_id("icon").unwrap())
+            .unwrap();
+        let back = doc
+            .get_box_by_id(doc.get_element_by_id("back").unwrap())
+            .unwrap();
+        let line = doc
+            .get_box_by_id(doc.get_element_by_id("line").unwrap())
+            .unwrap();
+        let baseline = line.layout.line_cache[0].y + line.layout.line_cache[0].ascent;
+        assert!(
+            (icon.layout.content_rect.h - ascent - descent).abs() < 0.01,
+            "inline font box must not adopt child's height: {child} {:?}",
+            icon.layout.content_rect
+        );
+        assert!(
+            (icon.layout.content_rect.y - (baseline - ascent)).abs() < 0.01,
+            "inline font box must use its own baseline: {child} {:?}",
+            icon.layout.content_rect
+        );
+        assert!((back.layout.border_rect.y - icon.layout.padding_rect.y - 4.0).abs() < 0.01);
+        assert!((back.layout.border_rect.x - icon.layout.padding_rect.x - 8.0).abs() < 0.01);
+    }
+}
+
+#[test]
+fn native_text_selection_uses_cascade_and_paints_at_both_scales() {
+    for (tag, value) in [
+        ("input", "abc"),
+        ("textarea", "abc\ndef"),
+        ("textarea", "مرحبا"),
+    ] {
+        let markup = if tag == "input" {
+            format!("<input id=control value='{value}'>")
+        } else {
+            format!("<textarea id=control>{value}</textarea>")
+        };
+        let (mut frame, _) = build(&format!(
+            "<style>body{{margin:0}}input,textarea{{font:20px/26px Arial;width:180px;height:80px;color:black;background:white}}input::selection,textarea::selection{{background:#00ff00;color:#ff0000}}</style>{markup}"
+        ));
+        let id = frame.doc.get_element_by_id("control").unwrap();
+        let node = frame.doc.get_box_by_id_mut(id).unwrap();
+        node.input_sel_anchor = 0;
+        node.input_cursor = value.chars().count();
+        let list = build_display_list(&frame.doc.root, 800.0, 600.0);
+        let selection = list
+            .commands
+            .iter()
+            .find_map(|cmd| match cmd {
+                PaintCmd::FormElement {
+                    node_id,
+                    text_selection,
+                    ..
+                } if *node_id == id => text_selection.as_ref(),
+                _ => None,
+            })
+            .expect("live native selection must be recorded");
+        assert_eq!(selection.range, 0..value.chars().count());
+        assert_eq!(selection.background, Color::rgb(0, 255, 0));
+        assert_eq!(selection.foreground, Color::rgb(255, 0, 0));
+        let mut fonts = cosmic_text::FontSystem::new();
+        let mut cache = cosmic_text::SwashCache::new();
+        for scale in [1.0, 2.0] {
+            let mut pixels =
+                tiny_skia::Pixmap::new((240.0 * scale) as u32, (100.0 * scale) as u32).unwrap();
+            replay_with_text(&list, &mut pixels, scale, &mut fonts, &mut cache);
+            assert!(
+                pixels
+                    .data()
+                    .chunks_exact(4)
+                    .any(|px| px == [0, 255, 0, 255]),
+                "{tag} selection background at {scale}x"
+            );
+            assert!(
+                pixels
+                    .data()
+                    .chunks_exact(4)
+                    .any(|px| px[0] > 128 && px[1] < 64 && px[2] < 64),
+                "{tag} selected glyph foreground at {scale}x"
+            );
+        }
+    }
+}
+
+#[test]
 fn empty_positioned_bullet_and_wrapped_link_border() {
     for direction in ["ltr", "rtl"] {
         let (_, list) = build(&format!(
@@ -739,9 +844,9 @@ fn video_with_controls_paints_media_surface() {
     assert!(
         list.commands.iter().any(|cmd| matches!(
             cmd,
-            PaintCmd::Text { text, .. } if text == "1:15"
+            PaintCmd::Text { text, .. } if text == "0:00 / 1:15"
         )),
-        "video controls should paint the media duration"
+        "video controls should paint the current time and media duration"
     );
 }
 
@@ -799,9 +904,9 @@ fn audio_with_controls_paints_compact_media_surface() {
     assert!(
         list.commands.iter().any(|cmd| matches!(
             cmd,
-            PaintCmd::Text { text, .. } if text == "0:09"
+            PaintCmd::Text { text, .. } if text == "0:00 / 0:09"
         )),
-        "audio controls should paint the media duration"
+        "audio controls should paint the current time and media duration"
     );
 }
 
@@ -947,6 +1052,76 @@ fn colored_div_has_fill_rect() {
         |cmd| matches!(cmd, PaintCmd::FillRect { color, .. } if color.r == 255 && color.g == 0),
     );
     assert!(has_red, "red div should produce FillRect with red");
+}
+
+#[test]
+fn inline_svg_live_paint_server_and_variable_mutations_invalidate_pixels() {
+    let (mut frame, _) = build(
+        r##"<svg id="icon" width="20" height="20" style="--paint:red">
+          <defs>
+            <linearGradient id="first"><stop stop-color="var(--paint)"/><stop offset="1" stop-color="var(--paint)"/></linearGradient>
+            <linearGradient id="second"><stop stop-color="blue"/><stop offset="1" stop-color="blue"/></linearGradient>
+          </defs>
+          <rect id="shape" width="20" height="20" style="fill:url(#first)"/>
+        </svg>"##,
+    );
+    let shape = frame.doc.get_element_by_id("shape").unwrap();
+    let icon = frame.doc.get_element_by_id("icon").unwrap();
+    for (target, property, value, expected) in [
+        (icon, "style", "--paint:red", [255, 0, 0, 255]),
+        (shape, "style", "fill:url(#second)", [0, 0, 255, 255]),
+        (shape, "style", "fill:url(#first)", [255, 0, 0, 255]),
+        (icon, "style", "--paint:lime", [0, 255, 0, 255]),
+        (shape, "style", "fill:url(#missing) blue", [0, 0, 255, 255]),
+        (shape, "style", "fill:url(#missing)", [0, 0, 0, 0]),
+    ] {
+        frame.doc.set_attribute(target, property, value);
+        frame.update_frame();
+        let list = build_display_list(&frame.doc.root, 800.0, 600.0);
+        let (data, width, _) = first_image_data(&list).expect("mutated SVG raster");
+        let offset = ((10 * width + 10) * 4) as usize;
+        assert_eq!(&data[offset..offset + 4], &expected, "mutation {value}");
+        let repeat = build_display_list(&frame.doc.root, 800.0, 600.0);
+        let (again, _, _) = first_image_data(&repeat).unwrap();
+        assert_eq!(data, again, "cached repeat after mutation {value}");
+    }
+}
+
+#[test]
+fn inline_svg_css_stroke_servers_inherit_and_change_through_dom() {
+    let (mut frame, _) = build(
+        r##"<style>#outline { fill:none; stroke:url(#paint); stroke-width:4 }</style>
+        <svg width="20" height="20">
+          <defs><linearGradient id="paint"><stop stop-color="red"/><stop offset="1" stop-color="red"/></linearGradient></defs>
+          <g id="outline"><rect id="shape" x="2" y="2" width="16" height="16"/></g>
+        </svg>"##,
+    );
+    let outline = frame.doc.get_element_by_id("outline").unwrap();
+    let shape = frame.doc.get_element_by_id("shape").unwrap();
+    assert_eq!(
+        frame.doc.computed_style_property(shape, "stroke"),
+        "url(#paint)"
+    );
+    for (value, expected) in [
+        ("stroke:url(#paint)", [255, 0, 0, 255]),
+        ("stroke:blue", [0, 0, 255, 255]),
+        ("stroke:url(#missing) lime", [0, 255, 0, 255]),
+        ("stroke:currentColor;color:red", [255, 0, 0, 255]),
+        ("stroke:none", [0, 0, 0, 0]),
+    ] {
+        frame.doc.set_attribute(outline, "style", value);
+        frame.update_frame();
+        let list = build_display_list(&frame.doc.root, 800.0, 600.0);
+        let (data, width, _) = first_image_data(&list).unwrap();
+        let offset = ((2 * width + 10) * 4) as usize;
+        assert_eq!(
+            &data[offset..offset + 4],
+            &expected,
+            "stroke mutation {value}"
+        );
+        let center = ((10 * width + 10) * 4) as usize;
+        assert_eq!(data[center + 3], 0, "fill:none stays transparent");
+    }
 }
 
 #[test]
@@ -1336,6 +1511,69 @@ fn inline_svg_child_selector_style_reaches_native_paint() {
         data[idx + 2],
         data[idx + 3]
     );
+}
+
+#[test]
+fn inline_svg_mixed_text_chunk_preserves_computed_center_and_end_alignment() {
+    fn bounds(data: &[u8], width: u32) -> (usize, usize, usize, usize) {
+        let mut result: Option<(usize, usize, usize, usize)> = None;
+        for (index, pixel) in data.chunks_exact(4).enumerate() {
+            if pixel[3] == 0 {
+                continue;
+            }
+            let (x, y) = (index % width as usize, index / width as usize);
+            result = Some(match result {
+                None => (x, y, x, y),
+                Some((left, top, right, bottom)) => {
+                    (left.min(x), top.min(y), right.max(x), bottom.max(y))
+                }
+            });
+        }
+        result.expect("SVG text must paint")
+    }
+
+    for (alignment, expected) in [
+        ("center", crate::types::TextAlign::Center),
+        ("end", crate::types::TextAlign::End),
+    ] {
+        let render = |content: &str| {
+            build(&format!(
+                "<style>svg text {{text-align:{alignment};font:24px monospace;fill:black}}</style>
+                <svg width='180' height='60' viewBox='0 0 180 60'>
+                    <text x='100' y='40'>{content}</text>
+                </svg>"
+            ))
+        };
+        let (frame, mixed) = render("A<tspan id='mixed-span'>AA</tspan>A");
+        let span = frame
+            .doc
+            .get_box_by_id(frame.doc.get_element_by_id("mixed-span").unwrap())
+            .unwrap();
+        assert_eq!(
+            span.style.text_align, expected,
+            "span must inherit computed {alignment}"
+        );
+        let (_, flat) = render("AAAA");
+        let (mixed_data, mixed_width, mixed_height) = first_image_data(&mixed).unwrap();
+        let (flat_data, flat_width, flat_height) = first_image_data(&flat).unwrap();
+        assert_eq!((mixed_width, mixed_height), (flat_width, flat_height));
+        let mixed_bounds = bounds(mixed_data, mixed_width);
+        let flat_bounds = bounds(flat_data, flat_width);
+        for (actual, expected) in [
+            mixed_bounds.0,
+            mixed_bounds.1,
+            mixed_bounds.2,
+            mixed_bounds.3,
+        ]
+        .into_iter()
+        .zip([flat_bounds.0, flat_bounds.1, flat_bounds.2, flat_bounds.3])
+        {
+            assert!(
+                actual.abs_diff(expected) <= 1,
+                "{alignment}: mixed={mixed_bounds:?} flat={flat_bounds:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -3671,6 +3909,7 @@ fn replay_scrolls_form_element_content() {
         direction: crate::types::Direction::LTR,
         placeholder_color: Color::rgba(0, 0, 0, 128),
         placeholder_typography: None,
+        value_typography: None,
         file_button_color: Color::BLACK,
         file_button_background: Color::TRANSPARENT,
         file_button_font_size: 16.0,
@@ -3680,11 +3919,13 @@ fn replay_scrolls_form_element_content() {
         value: String::new(),
         placeholder: String::new(),
         input_cursor: 0,
+        text_selection: None,
         appearance_none: false,
         vertical: false,
         options: Vec::new(),
         selected: -1,
         selected_all: Vec::new(),
+        content_scroll: (0.0, 0.0),
     });
 
     let mut pixmap = tiny_skia::Pixmap::new(80, 80).unwrap();
@@ -3713,6 +3954,68 @@ fn replay_scrolls_form_element_content() {
 }
 
 #[test]
+fn live_control_value_retains_computed_typography_without_mutating_value() {
+    let (_, list) = build(
+        r#"<input value="Hello world" style="width:220px;height:60px;color:red;font:italic 700 20px/12px serif;font-stretch:150%;letter-spacing:3px;word-spacing:7px;text-transform:uppercase;text-decoration:underline;text-shadow:3px 3px 0 blue">"#,
+    );
+    let styled = list
+        .commands
+        .iter()
+        .find(|command| matches!(command, PaintCmd::FormElement { .. }))
+        .unwrap()
+        .clone();
+    let PaintCmd::FormElement {
+        value,
+        value_typography: Some(typography),
+        ..
+    } = &styled
+    else {
+        panic!("computed value typography must be retained")
+    };
+    assert_eq!(
+        value, "Hello world",
+        "text-transform must not mutate the live form value"
+    );
+    assert_eq!(typography.font_style, 1);
+    assert_eq!(typography.font_weight, 700);
+    assert_eq!(typography.font_stretch, 150.0);
+    assert_eq!(typography.letter_spacing, 3.0);
+    assert_eq!(typography.word_spacing, 7.0);
+    assert_eq!(
+        typography.line_height, 12.0,
+        "authored line-height below the em must not be clamped"
+    );
+    assert!(!typography.normal_line_height);
+    assert!(typography.decoration.underline);
+    assert!(typography.shadow.is_some());
+    assert_eq!(typography.text_transform, TextTransform::Uppercase);
+    for scale in [1.0, 2.0] {
+        let paint = |command: PaintCmd| {
+            let mut display_list = DisplayList::new();
+            display_list.push(command);
+            let mut pixels =
+                tiny_skia::Pixmap::new((280.0 * scale) as u32, (100.0 * scale) as u32).unwrap();
+            let mut fonts = cosmic_text::FontSystem::new();
+            let mut glyphs = cosmic_text::SwashCache::new();
+            replay_with_text(&display_list, &mut pixels, scale, &mut fonts, &mut glyphs);
+            pixels
+        };
+        let mut plain = styled.clone();
+        if let PaintCmd::FormElement {
+            value_typography, ..
+        } = &mut plain
+        {
+            *value_typography = None;
+        }
+        assert_ne!(
+            paint(styled.clone()).data(),
+            paint(plain).data(),
+            "computed value typography must affect paint at scale {scale}"
+        );
+    }
+}
+
+#[test]
 fn placeholder_typography_changes_placeholder_paint_but_not_input_value() {
     let (_, list) = build(
         r#"<input type="text" placeholder="MMMM" style="width:200px;height:50px;font-size:10px">"#,
@@ -3730,12 +4033,14 @@ fn placeholder_typography_changes_placeholder_paint_but_not_input_value() {
     } = &mut styled
     {
         *placeholder_typography = Some(PlaceholderTypography {
+            layout: None,
             opacity: 1.0,
             font_size: 28.0,
             font_weight: 700,
             font_style: 1,
             font_family: "serif".to_string(),
             font_stretch: 100.0,
+            normal_line_height: false,
             line_height: 34.0,
             letter_spacing: 2.0,
             word_spacing: 0.0,
@@ -5942,12 +6247,12 @@ fn radial_gradient_descriptor_sets_center_and_ellipse_radii() {
     assert!((cx - 100.0).abs() < 0.001, "right center x, got {cx}");
     assert!((cy - 50.0).abs() < 0.001, "bottom center y, got {cy}");
     assert!(
-        rx <= 1.0,
-        "closest-side x radius clamps to the nearest side, got {rx}"
+        rx > 0.0 && rx < 0.001,
+        "zero-width ellipse uses a tiny positive x radius, got {rx}"
     );
     assert!(
-        ry <= 1.0,
-        "closest-side y radius clamps to the nearest side, got {ry}"
+        ry > 10_000.0,
+        "zero-width precedence gives the ellipse a very large y radius, got {ry}"
     );
 }
 
@@ -5971,6 +6276,92 @@ fn radial_gradient_explicit_circle_radius_stays_circular() {
     let (_, _, rx, ry) = radial_gradient_geometry(&list).expect("a radial gradient was painted");
     assert!((rx - 25.0).abs() < 0.001, "circle x radius, got {rx}");
     assert!((ry - 25.0).abs() < 0.001, "circle y radius, got {ry}");
+}
+
+#[test]
+fn radial_gradient_subpixel_radii_reach_paint_geometry() {
+    for (descriptor, expected) in [
+        ("circle .25px", (0.25_f32, 0.25_f32)),
+        ("ellipse .25px .75px", (0.25, 0.75)),
+        ("ellipse .75px .25px", (0.75, 0.25)),
+        ("circle closest-side", (0.25, 0.25)),
+        ("ellipse closest-side", (0.25, 0.75)),
+        (
+            "circle closest-corner",
+            (0.25_f32.hypot(0.75), 0.25_f32.hypot(0.75)),
+        ),
+        (
+            "ellipse closest-corner",
+            (
+                0.25 * std::f32::consts::SQRT_2,
+                0.75 * std::f32::consts::SQRT_2,
+            ),
+        ),
+    ] {
+        let (_, list) = build(&format!(
+            "<div style=\"width:100px;height:50px;background:radial-gradient({descriptor} at .25px .75px,red,blue)\"></div>"
+        ));
+        let (_, _, rx, ry) = radial_gradient_geometry(&list).expect("radial gradient was painted");
+        assert!(
+            (rx - expected.0).abs() < 0.001 && (ry - expected.1).abs() < 0.001,
+            "{descriptor}: radii=({rx},{ry}), expected={expected:?}"
+        );
+    }
+}
+
+#[test]
+fn radial_gradient_outside_centers_measure_extended_box_edges() {
+    for (cx, cy) in [
+        (-20.0_f32, 30.0_f32),
+        (120.0, 30.0),
+        (50.0, -20.0),
+        (50.0, 80.0),
+        (-20.0, -20.0),
+        (120.0, 80.0),
+    ] {
+        let near_x = cx.abs().min((100.0 - cx).abs());
+        let far_x = cx.abs().max((100.0 - cx).abs());
+        let near_y = cy.abs().min((60.0 - cy).abs());
+        let far_y = cy.abs().max((60.0 - cy).abs());
+        for shape in ["circle", "ellipse"] {
+            for (extent, dx, dy, corner) in [
+                ("closest-side", near_x, near_y, false),
+                ("farthest-side", far_x, far_y, false),
+                ("closest-corner", near_x, near_y, true),
+                ("farthest-corner", far_x, far_y, true),
+            ] {
+                let (_, list) = build(&format!(
+                    "<div style=\"width:100px;height:60px;\
+                     background:radial-gradient({shape} {extent} at {cx}px {cy}px,red,blue)\"></div>"
+                ));
+                let (actual_cx, actual_cy, rx, ry) = radial_gradient_geometry(&list).unwrap();
+                let (expected_rx, expected_ry) = if shape == "circle" {
+                    let radius = if corner {
+                        dx.hypot(dy)
+                    } else if extent == "closest-side" {
+                        dx.min(dy)
+                    } else {
+                        dx.max(dy)
+                    };
+                    (radius, radius)
+                } else {
+                    let factor = if corner {
+                        std::f32::consts::SQRT_2
+                    } else {
+                        1.0
+                    };
+                    (dx * factor, dy * factor)
+                };
+                assert!(
+                    (actual_cx - cx).abs() < 0.01
+                        && (actual_cy - cy).abs() < 0.01
+                        && (rx - expected_rx).abs() < 0.01
+                        && (ry - expected_ry).abs() < 0.01,
+                    "{shape} {extent} at ({cx},{cy}): actual=({actual_cx},{actual_cy},{rx},{ry}), expected radii=({expected_rx},{expected_ry})"
+                );
+            }
+        }
+    }
 }
 
 #[test]
@@ -6503,6 +6894,7 @@ fn appearance_none_checkbox_does_not_paint_native_chrome() {
         direction: crate::types::Direction::LTR,
         placeholder_color: Color::rgba(0, 0, 0, 128),
         placeholder_typography: None,
+        value_typography: None,
         file_button_color: Color::BLACK,
         file_button_background: Color::TRANSPARENT,
         file_button_font_size: 16.0,
@@ -6512,11 +6904,13 @@ fn appearance_none_checkbox_does_not_paint_native_chrome() {
         value: String::new(),
         placeholder: String::new(),
         input_cursor: 0,
+        text_selection: None,
         appearance_none: true,
         vertical: false,
         options: Vec::new(),
         selected: -1,
         selected_all: Vec::new(),
+        content_scroll: (0.0, 0.0),
     });
 
     let mut pixmap = tiny_skia::Pixmap::new(24, 24).unwrap();
@@ -6545,6 +6939,7 @@ fn form_labels_respect_text_indent_and_control_clipping() {
         direction: crate::types::Direction::LTR,
         placeholder_color: Color::BLACK,
         placeholder_typography: None,
+        value_typography: None,
         file_button_color: Color::BLACK,
         file_button_background: Color::TRANSPARENT,
         file_button_font_size: 14.0,
@@ -6554,11 +6949,13 @@ fn form_labels_respect_text_indent_and_control_clipping() {
         value: "Go".to_string(),
         placeholder: String::new(),
         input_cursor: 0,
+        text_selection: None,
         appearance_none: true,
         vertical: false,
         options: Vec::new(),
         selected: -1,
         selected_all: Vec::new(),
+        content_scroll: (0.0, 0.0),
     });
     let mut pixmap = tiny_skia::Pixmap::new(160, 50).unwrap();
     pixmap.fill(tiny_skia::Color::WHITE);

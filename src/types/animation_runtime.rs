@@ -368,9 +368,7 @@ impl Document {
         collect(&self.root, &mut current);
 
         current.retain(|(_, anim)| {
-            !anim.name.is_empty()
-                && anim.name != "none"
-                && self.stylesheet.keyframes.contains_key(&anim.name)
+            !anim.name.is_empty() && self.stylesheet.keyframes.contains_key(&anim.name)
         });
 
         // CSS Animations 1 matches the new list from last to first, consuming

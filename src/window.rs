@@ -146,6 +146,13 @@ pub fn open(target: &str, features: &str) -> WindowId {
 /// Idempotent, and it must be: a second context over one document would be a
 /// second tab showing the same page.
 pub fn adopt(document_id: DocumentId, name: &str) -> WindowId {
+    let (viewport_w, viewport_h) = registry::with_document(document_id, |doc| {
+        (doc.viewport_w as f64, doc.viewport_h as f64)
+    })
+    .unwrap_or((
+        registry::DEFAULT_VIEWPORT_WIDTH as f64,
+        registry::DEFAULT_VIEWPORT_HEIGHT as f64,
+    ));
     let mut ctx = match contexts().lock() {
         Ok(c) => c,
         Err(_) => return 0,
@@ -168,14 +175,34 @@ pub fn adopt(document_id: DocumentId, name: &str) -> WindowId {
             name: name.to_string(),
             screen_x: 0.0,
             screen_y: 0.0,
-            viewport_w: 800.0,
-            viewport_h: 600.0,
+            viewport_w,
+            viewport_h,
             device_pixel_ratio: 1.0,
             closed: false,
         },
     );
     ctx.order.push(id);
     id
+}
+
+/// Apply supported native window features to an existing initial context.
+pub fn configure_features(id: WindowId, features: &str) {
+    let features = parse_features(features);
+    let width = features
+        .get("width")
+        .copied()
+        .unwrap_or_else(|| inner_width(id));
+    let height = features
+        .get("height")
+        .copied()
+        .unwrap_or_else(|| inner_height(id));
+    resize_to(id, width, height);
+    let x = features
+        .get("left")
+        .copied()
+        .unwrap_or_else(|| screen_x(id));
+    let y = features.get("top").copied().unwrap_or_else(|| screen_y(id));
+    move_to(id, x, y);
 }
 
 /// Borrow a browsing context.
@@ -258,6 +285,12 @@ pub fn match_media(id: WindowId, query: &str) -> Option<crate::dom::api::MediaQu
 /// `window.resizeTo(width, height)`. Writes the document's viewport, which is
 /// what `innerWidth`/`innerHeight` then report — one measurement, not two.
 pub fn resize_to(id: WindowId, width: f64, height: f64) {
+    update_viewport(id, width, height);
+}
+
+/// Update viewport state without synchronously laying out with a second engine.
+/// The owning BrowserView consumes dirty geometry at its next frame boundary.
+pub fn update_viewport(id: WindowId, width: f64, height: f64) {
     if let Ok(mut ctx) = contexts().lock() {
         if let Some(w) = ctx.windows.get_mut(&id) {
             if !w.closed {
@@ -267,7 +300,13 @@ pub fn resize_to(id: WindowId, width: f64, height: f64) {
         }
     }
     if let Some(d) = document(id) {
-        registry::with_document(d, |doc| doc.set_viewport(width as f32, height as f32));
+        registry::with_document(d, |doc| {
+            if doc.viewport_w != width as f32 || doc.viewport_h != height as f32 {
+                crate::css::cascade::mark_layout_subtree_dirty(&mut doc.root);
+                doc.viewport_w = width as f32;
+                doc.viewport_h = height as f32;
+            }
+        });
     }
 }
 
@@ -359,5 +398,74 @@ pub fn open_windows() -> Vec<WindowId> {
             .filter(|id| ctx.windows.get(id).map(|w| !w.closed).unwrap_or(false))
             .collect(),
         Err(_) => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::browser::BrowserDocument;
+
+    #[test]
+    fn adopted_context_preserves_live_document_and_viewport() {
+        let mut doc = crate::parse_html("<body><div id='status'>Before</div></body>");
+        doc.set_viewport(375.0, 240.0);
+        let handle = BrowserDocument::new(doc);
+        let document_id = registry::register_document(handle.clone());
+        let context = adopt(document_id, "form");
+        assert_eq!(adopt(document_id, "ignored"), context);
+        assert_eq!(default_view(document_id), Some(context));
+        assert_eq!(document(context), Some(document_id));
+        assert_eq!(
+            (inner_width(context), inner_height(context)),
+            (375.0, 240.0)
+        );
+
+        registry::with_document(document_id, |doc| {
+            let status = doc.get_element_by_id("status").unwrap();
+            doc.set_text_content(status, "After");
+        });
+        let doc = handle.read();
+        let status = doc.get_element_by_id("status").unwrap();
+        assert_eq!(doc.text_content(status), "After");
+        drop(doc);
+        close(context);
+    }
+
+    #[test]
+    fn resize_and_features_update_the_shared_document() {
+        let handle = BrowserDocument::new(crate::parse_html("<body>Form</body>"));
+        let document_id = registry::register_document(handle.clone());
+        let context = adopt(document_id, "form");
+        configure_features(context, "width=640,height=480,left=12,top=23");
+        assert_eq!(
+            (inner_width(context), inner_height(context)),
+            (640.0, 480.0)
+        );
+        assert_eq!((screen_x(context), screen_y(context)), (12.0, 23.0));
+        {
+            let doc = handle.read();
+            assert_eq!((doc.viewport_w, doc.viewport_h), (640.0, 480.0));
+        }
+        update_viewport(context, 320.0, 200.0);
+        let viewport = visual_viewport(context).unwrap();
+        assert_eq!((viewport.width, viewport.height), (320.0, 200.0));
+        close(context);
+    }
+
+    #[test]
+    fn closing_context_unregisters_document_but_retains_host_ownership() {
+        let handle = BrowserDocument::new(crate::parse_html("<body>Form</body>"));
+        let document_id = registry::register_document(handle.clone());
+        let context = adopt(document_id, "form");
+        close(context);
+        close(context);
+        assert!(closed(context));
+        assert!(!registry::is_open(document_id));
+        assert_eq!(default_view(document_id), None);
+        assert!(!open_windows().contains(&context));
+        assert!(visual_viewport(context).is_none());
+        let doc = handle.read();
+        assert!(doc.get_node(doc.root.node_id).is_some());
     }
 }

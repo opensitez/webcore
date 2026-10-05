@@ -543,8 +543,35 @@ fn set_text_content_replaces_children() {
     assert_eq!(div_box.children[0].text, "new text only");
 
     // Empty text is the spec's null case: children removed, nothing inserted.
+    doc.style_dirty = false;
     doc.set_text_content(div, "");
     assert_eq!(doc.child_nodes(div).len(), 0);
+    assert!(
+        doc.style_dirty,
+        "empty replacement must invalidate :empty styles"
+    );
+}
+
+#[test]
+fn detached_table_rows_remain_queryable_after_text_replacement() {
+    let mut doc = parse_html("<html><body></body></html>");
+    let grid = doc.create_element("div");
+    let table = doc.create_element("table");
+    let body = doc.create_element("tbody");
+    doc.append_child(grid, table);
+    doc.append_child(table, body);
+
+    for value in ["old", "new"] {
+        doc.set_text_content(body, "");
+        let row = doc.create_element("tr");
+        let cell = doc.create_element("td");
+        doc.set_text_content(cell, value);
+        doc.append_child(row, cell);
+        doc.append_child(body, row);
+        assert_eq!(doc.query_selector_all_within(grid, "tbody tr"), vec![row]);
+        assert_eq!(doc.query_selector_all_within(row, "td"), vec![cell]);
+        assert_eq!(doc.text_content(cell), value);
+    }
 }
 
 #[test]

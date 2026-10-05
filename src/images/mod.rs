@@ -6,6 +6,7 @@ use crate::types::*;
 use webmedia::bitmap::premultiply_rgba;
 
 pub(crate) mod cache;
+mod gif_reader;
 pub mod stream;
 
 // ─── Image loading ─────────────────────────────────────────────────────────
@@ -91,6 +92,8 @@ pub fn resolve_url(src: &str, base_url: &str) -> String {
 /// Dimensions are NOT baked into the style here — the layout engine handles
 /// aspect-ratio sizing after the CSS cascade has set any explicit width/height.
 pub fn set_image_on_node(node: &mut WebCore, data: Vec<u8>, w: u32, h: u32) {
+    node.image_is_fallback = false;
+    node.svg_document = None;
     node.image_data = Some(std::sync::Arc::new(data));
     node.image_data_width = w;
     node.image_data_height = h;
@@ -104,8 +107,10 @@ pub fn set_image_on_node(node: &mut WebCore, data: Vec<u8>, w: u32, h: u32) {
 /// Set decoded image (raster or SVG) on an img node.
 /// SVGs are parsed into the native SVG tree and rasterized at paint size.
 pub fn set_decoded_image_on_node(node: &mut WebCore, decoded: DecodedImage) {
+    node.image_is_fallback = false;
     match decoded {
         DecodedImage::Raster(data, w, h) => {
+            node.svg_document = None;
             node.image_data = Some(data);
             node.image_data_width = w;
             node.image_data_height = h;
@@ -116,6 +121,7 @@ pub fn set_decoded_image_on_node(node: &mut WebCore, decoded: DecodedImage) {
             node.animated_image_last_tick = None;
         }
         DecodedImage::Animated(animated) => {
+            node.svg_document = None;
             node.image_data = animated.frames.first().map(|frame| frame.pixels.clone());
             node.image_data_width = animated.width;
             node.image_data_height = animated.height;
@@ -137,6 +143,7 @@ pub fn set_decoded_image_on_node(node: &mut WebCore, decoded: DecodedImage) {
 }
 
 fn set_svg_image_dimensions(node: &mut WebCore, iw: f32, ih: f32) {
+    node.image_data = None;
     node.svg_viewbox_w = iw;
     node.svg_viewbox_h = ih;
     node.image_data_width = 0;
@@ -266,7 +273,10 @@ pub fn set_decoded_mask_image_layer_for_url_on_node(
     let source = if index == 0 {
         node.style.rare().mask_image_set_source.as_deref()
     } else {
-        node.style.rare().additional_mask_images.get(index - 1)
+        node.style
+            .rare()
+            .additional_mask_images
+            .get(index - 1)
             .and_then(|layer| layer.image_set_source.as_deref())
     };
     let resolution = source
@@ -525,7 +535,10 @@ fn decode_animated_image(
         decode_animation_frames_with_size(decoder.apng().ok()?, width, height, None, Some(2), None)
     } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
         decode_animation_frames_inner(
-            image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes)).ok()?,
+            image::codecs::gif::GifDecoder::new(
+                gif_reader::reader(std::io::Cursor::new(bytes)).ok()?,
+            )
+            .ok()?,
             None,
             Some(2),
             None,
@@ -642,6 +655,48 @@ fn resize_animated_frame(buffer: image::RgbaImage, width: u32, height: u32) -> O
 #[cfg(test)]
 mod raster_decode_tests {
     use super::*;
+
+    #[test]
+    fn image_publication_replaces_raster_and_svg_representations() {
+        let mut node = WebCore::new("img");
+        let svg = || {
+            decode_image_bytes_ex(br#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><rect width="20" height="10" fill="red"/></svg>"#).unwrap()
+        };
+        set_image_on_node(&mut node, vec![255, 0, 0, 255], 1, 1);
+        set_decoded_image_on_node(&mut node, svg());
+        assert!(
+            node.image_data.is_none(),
+            "old raster must not hide the new SVG"
+        );
+        assert!(node.svg_document.is_some());
+        assert_eq!((node.image_width, node.image_height), (20, 10));
+        set_decoded_image_on_node(
+            &mut node,
+            DecodedImage::Raster(std::sync::Arc::new(vec![0, 0, 255, 255]), 1, 1),
+        );
+        assert!(
+            node.svg_document.is_none(),
+            "old SVG must not survive a raster replacement"
+        );
+        assert_eq!(
+            node.image_data.as_ref().unwrap().as_slice(),
+            &[0, 0, 255, 255]
+        );
+    }
+
+    #[test]
+    fn palette_free_gif_retains_transparency_and_intrinsic_size() {
+        let bytes = image_data_url_bytes(
+            "data:image/gif;base64,R0lGODlhAQABAHAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==",
+        )
+        .unwrap();
+        let DecodedImage::Raster(pixels, width, height) = decode_image_bytes_ex(&bytes).unwrap()
+        else {
+            panic!("expected raster")
+        };
+        assert_eq!((width, height), (1, 1));
+        assert_eq!(pixels.as_slice(), &[0, 0, 0, 0]);
+    }
 
     fn encode(img: image::DynamicImage, format: image::ImageFormat) -> Vec<u8> {
         let mut output = std::io::Cursor::new(Vec::new());
@@ -800,8 +855,9 @@ pub(crate) fn expand_animated_image_to_size(
                 )
             })
     } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
-        image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes.as_slice()))
+        gif_reader::reader(std::io::Cursor::new(bytes.as_slice()))
             .ok()
+            .and_then(|reader| image::codecs::gif::GifDecoder::new(reader).ok())
             .and_then(|decoder| decode_animation_frames_inner(decoder, None, None, target_size))
     } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         image::codecs::webp::WebPDecoder::new(std::io::Cursor::new(bytes.as_slice()))

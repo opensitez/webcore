@@ -32,6 +32,10 @@ use crate::dom::attrs::AttrMap;
 /// A DOM mutation produced by the streaming parser.
 #[derive(Clone, Debug)]
 pub enum DomMutation {
+    /// Rendering mode selected by the initial insertion mode, before content.
+    SetDocumentMode {
+        doctype: Option<crate::html::doctype::Doctype>,
+    },
     /// Attributes from the document element when an incoming `<html>` tag is
     /// adopted into the existing root.
     SetRootAttributes { attributes: AttrMap },
@@ -79,9 +83,11 @@ struct OpenElement {
     tag: String,
     path: Vec<usize>,
     child_count: usize,
+    in_svg: bool,
 }
 
 pub struct StreamingParser {
+    mode_determined: bool,
     /// Accumulated buffer of unparsed HTML (incomplete tags carry over).
     buffer: String,
     /// Base URL for resolving relative links.
@@ -124,6 +130,7 @@ impl StreamingParser {
     /// Create a new streaming parser with a base URL.
     pub fn new(base_url: &str) -> Self {
         Self {
+            mode_determined: false,
             buffer: String::new(),
             base_url: base_url.to_string(),
             stack: Vec::new(),
@@ -188,6 +195,7 @@ impl StreamingParser {
             tag: "body".to_string(),
             path: body_path,
             child_count: 0,
+            in_svg: false,
         });
         self.body_started = true;
         self.head_closed = true;
@@ -376,6 +384,25 @@ impl StreamingParser {
                 break;
             };
             self.buffer = buf[complete.end..].to_string();
+            let self_closing_syntax = complete.self_closing_syntax;
+            if !self.mode_determined {
+                let doctype = match &complete.token {
+                    crate::html::tokenizer::Token::Comment(_) => None,
+                    crate::html::tokenizer::Token::Text(text)
+                        if text
+                            .chars()
+                            .all(|ch| matches!(ch, '\t' | '\n' | '\u{000c}' | '\r' | ' ')) =>
+                    {
+                        None
+                    }
+                    crate::html::tokenizer::Token::Doctype(doctype) => Some(Some(doctype.clone())),
+                    _ => Some(None),
+                };
+                if let Some(doctype) = doctype {
+                    mutations.push(DomMutation::SetDocumentMode { doctype });
+                    self.mode_determined = true;
+                }
+            }
             match complete.token {
                 crate::html::tokenizer::Token::Text(text) => {
                     self.push_text_mutation(&mut mutations, text);
@@ -398,6 +425,13 @@ impl StreamingParser {
                     attrs,
                     self_closing,
                 } => {
+                    let in_svg = tag == "svg" || self.in_svg_foreign_content();
+                    // HTML foreign-content insertion acknowledges the slash only in SVG.
+                    let self_closing = if in_svg {
+                        self_closing_syntax
+                    } else {
+                        self_closing
+                    };
                     self.discover_resources(&tag, &attrs, &mut mutations);
 
                     if tag == "style" && !self_closing {
@@ -422,6 +456,7 @@ impl StreamingParser {
                                 tag,
                                 path: element_path.clone(),
                                 child_count: 0,
+                                in_svg,
                             });
                             self.style_node_path = Some(element_path);
                             self.in_style = true;
@@ -432,7 +467,7 @@ impl StreamingParser {
                         self.style_buffer.clear();
                         continue;
                     }
-                    if tag == "title" && !self_closing {
+                    if tag == "title" && !in_svg && !self_closing {
                         self.in_title = true;
                         self.title.clear();
                         continue;
@@ -447,6 +482,7 @@ impl StreamingParser {
                                 tag,
                                 path: Vec::new(),
                                 child_count: self.root_child_count,
+                                in_svg: false,
                             });
                         }
                         continue;
@@ -462,7 +498,8 @@ impl StreamingParser {
                         self.ensure_body_open(&mut mutations);
                     }
 
-                    while self.stack.len() > 1
+                    while !in_svg
+                        && self.stack.len() > 1
                         && self.stack.last().is_some_and(|open| {
                             crate::html::tokenizer::should_auto_close(&open.tag, &tag)
                         })
@@ -483,12 +520,13 @@ impl StreamingParser {
                     });
                     self.bump_child_count();
 
-                    let is_void = self_closing || is_html_void_element(&tag);
+                    let is_void = self_closing || (!in_svg && is_html_void_element(&tag));
                     if !is_void {
                         self.stack.push(OpenElement {
                             tag: tag.clone(),
                             path: element_path,
                             child_count: 0,
+                            in_svg,
                         });
                         if tag == "script" {
                             self.in_script = true;
@@ -499,6 +537,12 @@ impl StreamingParser {
         }
 
         mutations
+    }
+
+    fn in_svg_foreign_content(&self) -> bool {
+        self.stack.last().is_some_and(|open| {
+            open.in_svg && !matches!(open.tag.as_str(), "foreignobject" | "desc" | "title")
+        })
     }
 
     fn push_text_mutation(&mut self, mutations: &mut Vec<DomMutation>, text: String) {
@@ -577,6 +621,9 @@ impl StreamingParser {
                     .split_ascii_whitespace()
                     .any(|part| part == "stylesheet")
                 {
+                    if attrs.contains_key("disabled") {
+                        return;
+                    }
                     if let Some(href) = attrs.get("href") {
                         let url = crate::html::resolve_url(href, &self.base_url);
                         // Stylesheets in <head> are render-blocking
@@ -627,6 +674,21 @@ impl StreamingParser {
                         self.discovered_resources
                             .push((ResourceKind::Preconnect, href.clone()));
                     }
+                }
+            }
+            "input"
+                if attrs
+                    .get("type")
+                    .is_some_and(|value| value.trim().eq_ignore_ascii_case("image")) =>
+            {
+                if let Some(src) = attrs.get("src").filter(|src| !src.trim().is_empty()) {
+                    let url = crate::html::resolve_url(src, &self.base_url);
+                    self.discovered_resources
+                        .push((ResourceKind::Image, url.clone()));
+                    mutations.push(DomMutation::ResourceHint {
+                        kind: ResourceKind::Image,
+                        url,
+                    });
                 }
             }
             "img" => {
@@ -840,6 +902,152 @@ mod tests {
         assert_eq!(parent_for("path"), path_for("g"));
     }
 
+    fn self_closing_element_paths(
+        mutations: &[DomMutation],
+    ) -> Vec<(String, Vec<usize>, Vec<usize>)> {
+        mutations
+            .iter()
+            .filter_map(|mutation| match mutation {
+                DomMutation::InsertElement {
+                    parent_path,
+                    path,
+                    attributes,
+                    ..
+                } => attributes
+                    .get("id")
+                    .map(|id| (id.clone(), parent_path.clone(), path.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn assert_self_closing_parent(
+        elements: &[(String, Vec<usize>, Vec<usize>)],
+        child: &str,
+        parent: &str,
+    ) {
+        let child = elements.iter().find(|element| element.0 == child).unwrap();
+        let parent = elements.iter().find(|element| element.0 == parent).unwrap();
+        assert_eq!(child.1, parent.2, "wrong parent for {}", child.0);
+    }
+
+    #[test]
+    fn streaming_svg_self_closing_siblings_survive_every_chunk_boundary() {
+        let html = "<svg id='s'><rect id='a'/><rect id='b'/><path id='p'/><text id='t'>T</text><g id='g'><animate id='anim'/><circle id='c'/><circle id='container'><animate id='child'/></circle></g></svg><p id='after'>after</p>";
+        let mut whole = StreamingParser::new("");
+        let mut mutations = whole.feed_str(html);
+        mutations.extend(whole.finish());
+        let expected = self_closing_element_paths(&mutations);
+        for child in ["a", "b", "p", "t", "g"] {
+            assert_self_closing_parent(&expected, child, "s");
+        }
+        for child in ["anim", "c", "container"] {
+            assert_self_closing_parent(&expected, child, "g");
+        }
+        assert_self_closing_parent(&expected, "child", "container");
+        let svg = expected.iter().find(|element| element.0 == "s").unwrap();
+        let after = expected
+            .iter()
+            .find(|element| element.0 == "after")
+            .unwrap();
+        assert_eq!(svg.1, after.1, "following HTML must be outside SVG");
+        for split in 0..=html.len() {
+            let mut parser = StreamingParser::new("");
+            let mut mutations = parser.feed_str(&html[..split]);
+            mutations.extend(parser.feed_str(&html[split..]));
+            mutations.extend(parser.finish());
+            assert_eq!(
+                self_closing_element_paths(&mutations),
+                expected,
+                "split {split}"
+            );
+        }
+        let mut parser = StreamingParser::new("");
+        let mut mutations = Vec::new();
+        for byte in html.as_bytes() {
+            mutations.extend(parser.feed(&[*byte]));
+        }
+        mutations.extend(parser.finish());
+        assert_eq!(self_closing_element_paths(&mutations), expected);
+    }
+
+    #[test]
+    fn streaming_svg_integration_points_keep_html_slashes_ignored_and_allow_nested_svg() {
+        for integration in ["foreignObject", "desc", "title"] {
+            let html = format!(
+                "<svg id='outer'><{integration} id='integration'><div id='html'/><span id='nested'>H</span><svg id='inner'><rect id='r1'/><rect id='r2'/></svg></div></{integration}><rect id='tail'/></svg><div id='plain'/><span id='plain-child'>P</span></div>"
+            );
+            for split in 0..=html.len() {
+                let mut parser = StreamingParser::new("");
+                let mut mutations = parser.feed_str(&html[..split]);
+                mutations.extend(parser.feed_str(&html[split..]));
+                mutations.extend(parser.finish());
+                let elements = self_closing_element_paths(&mutations);
+                for (child, parent) in [
+                    ("integration", "outer"),
+                    ("html", "integration"),
+                    ("nested", "html"),
+                    ("inner", "html"),
+                    ("r1", "inner"),
+                    ("r2", "inner"),
+                    ("tail", "outer"),
+                    ("plain-child", "plain"),
+                ] {
+                    assert_self_closing_parent(&elements, child, parent);
+                }
+                assert!(
+                    !mutations
+                        .iter()
+                        .any(|mutation| matches!(mutation, DomMutation::TitleChanged { .. })),
+                    "SVG title must not become the document title"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_svg_unquoted_slash_stays_in_value_at_every_chunk_boundary() {
+        for (open, expected_value, self_closing) in [
+            ("<g id='g' data-v=x/>", "x/", false),
+            ("<g id='g' data-v=x//>", "x//", false),
+            ("<g id='g' data-v=/>", "/", false),
+            ("<g id='g' data-v=x/ >", "x/", false),
+            ("<g id='g' data-v=x />", "x", true),
+            ("<g id='g' data-v='x'/>", "x", true),
+            ("<g id='g' data-v=\"x\"/>", "x", true),
+            ("<g id='g' data-v='x/'/>", "x/", true),
+        ] {
+            let close = if self_closing { "" } else { "</g>" };
+            let html = format!("<svg id='s'>{open}<rect id='r'/>{close}<rect id='tail'/></svg>");
+            for split in 0..=html.len() {
+                let mut parser = StreamingParser::new("");
+                let mut mutations = parser.feed_str(&html[..split]);
+                mutations.extend(parser.feed_str(&html[split..]));
+                mutations.extend(parser.finish());
+                let elements = self_closing_element_paths(&mutations);
+                assert_self_closing_parent(&elements, "g", "s");
+                assert_self_closing_parent(&elements, "r", if self_closing { "s" } else { "g" });
+                assert_self_closing_parent(&elements, "tail", "s");
+                let attrs = mutations
+                    .iter()
+                    .find_map(|mutation| match mutation {
+                        DomMutation::InsertElement { attributes, .. }
+                            if attributes.get("id").is_some_and(|id| id == "g") =>
+                        {
+                            Some(attributes)
+                        }
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(
+                    attrs.get("data-v").map(String::as_str),
+                    Some(expected_value),
+                    "{open} split {split}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn streaming_basic() {
         let mut parser = StreamingParser::new("");
@@ -975,6 +1183,51 @@ mod tests {
                 if url == "https://example.com/dark.css"
                     && media == "(prefers-color-scheme: dark)"
         )));
+    }
+
+    #[test]
+    fn streaming_image_submitter_discovers_src_before_document_completion() {
+        let mut parser = StreamingParser::new("https://example.test/forms/");
+        let mutations =
+            parser.feed_str("<form><input type='IMAGE' src='../send.png' width=80 height=24>");
+        assert!(!parser.is_finished());
+        assert!(mutations.iter().any(|mutation| matches!(mutation,
+            DomMutation::ResourceHint { kind: ResourceKind::Image, url }
+                if url == "https://example.test/send.png"
+        )));
+        let text = parser.feed_str("<input type=text src='../not-an-image.png'>");
+        assert!(!text.iter().any(|mutation| matches!(
+            mutation,
+            DomMutation::ResourceHint {
+                kind: ResourceKind::Image,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn streaming_disabled_stylesheets_do_not_become_active_resources() {
+        for disabled in ["disabled", "disabled=\"\"", "disabled=\"false\""] {
+            let mut parser = StreamingParser::new("https://example.com/");
+            let mutations = parser.feed_str(&format!(
+                "<head><link rel='stylesheet' href='dark.css' {disabled}></head>"
+            ));
+            assert!(
+                !mutations
+                    .iter()
+                    .any(|mutation| matches!(mutation, DomMutation::StylesheetHint { .. }))
+            );
+            assert!(parser.discovered_resources.is_empty());
+            assert!(parser.render_blocking.is_empty());
+            assert!(
+                mutations.iter().any(|mutation| matches!(
+                    mutation,
+                    DomMutation::InsertElement { tag, attributes, .. }
+                        if tag == "link" && attributes.contains_key("disabled")
+                )),
+                "disabled links must remain in the DOM"
+            );
+        }
     }
 
     #[test]
@@ -1219,6 +1472,46 @@ mod tests {
                 } if url == "https://example.com/hero.webp"
             )
         }));
+    }
+
+    #[test]
+    fn streaming_document_mode_is_published_once_before_elements() {
+        let mut parser = StreamingParser::new("");
+        assert!(
+            parser
+                .feed_str("<!-- lead --><!DOC")
+                .iter()
+                .all(|mutation| !matches!(mutation, DomMutation::SetDocumentMode { .. }))
+        );
+        let mutations = parser.feed_str("TYPE html><body><input></body><!DOCTYPE html>");
+        assert!(matches!(
+            mutations.first(),
+            Some(DomMutation::SetDocumentMode { doctype: Some(_) })
+        ));
+        assert_eq!(
+            mutations
+                .iter()
+                .filter(|mutation| matches!(mutation, DomMutation::SetDocumentMode { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn streaming_missing_doctype_selects_quirks_before_elements() {
+        let mut parser = StreamingParser::new("");
+        let mutations = parser.feed_str("<body><input><!DOCTYPE html>");
+        assert!(matches!(
+            mutations.first(),
+            Some(DomMutation::SetDocumentMode { doctype: None })
+        ));
+        assert_eq!(
+            mutations
+                .iter()
+                .filter(|mutation| matches!(mutation, DomMutation::SetDocumentMode { .. }))
+                .count(),
+            1
+        );
     }
 
     #[test]

@@ -5,8 +5,31 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 static ENABLED: AtomicBool = AtomicBool::new(false);
+static MEDIA_ENABLED: AtomicBool = AtomicBool::new(false);
+static VIDEO_QUEUE_REJECTS: AtomicU64 = AtomicU64::new(0);
+static VIDEO_CHANNEL_DROPS: AtomicU64 = AtomicU64::new(0);
 static EPOCH: AtomicU64 = AtomicU64::new(0);
 static STATE: OnceLock<Mutex<ProfileState>> = OnceLock::new();
+
+/// Enable bounded audio/video worker diagnostics without per-frame logging.
+pub fn enable_media() {
+    MEDIA_ENABLED.store(true, Ordering::Release);
+}
+
+pub(crate) fn media_enabled() -> bool {
+    MEDIA_ENABLED.load(Ordering::Acquire)
+}
+
+pub(crate) fn record_video_backpressure(channel: bool, frames: usize) {
+    if media_enabled() {
+        let counter = if channel { &VIDEO_CHANNEL_DROPS } else { &VIDEO_QUEUE_REJECTS };
+        counter.fetch_add(frames as u64, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn video_backpressure() -> (u64, u64) {
+    (VIDEO_QUEUE_REJECTS.load(Ordering::Relaxed), VIDEO_CHANNEL_DROPS.load(Ordering::Relaxed))
+}
 
 #[derive(Clone, Copy, Debug)]
 #[repr(usize)]
@@ -46,6 +69,7 @@ pub enum Phase {
     LayoutGrid,
     LayoutFlex,
     LayoutIntrinsic,
+    InlineTextCollect,
     GeometryFinalize,
     GeometryContainerQueries,
     FrameUpdate,
@@ -70,6 +94,9 @@ pub enum Phase {
     PlatformDraw,
     PlatformConvert,
     PlatformPresent,
+    PlatformImageCreate,
+    PlatformUpload,
+    PlatformCommit,
     VideoLayerPresent,
     ScrollPaint,
     RasterFill,
@@ -87,10 +114,12 @@ pub enum Phase {
     FramePaintSvgAnimation,
     FramePaintVideo,
     FramePaintOther,
+    BrowserIdle,
+    BrowserVideoSelection,
 }
 
 impl Phase {
-    pub const ALL: [Self; 76] = [
+    pub const ALL: [Self; 82] = [
         Self::HtmlFetch,
         Self::HtmlParse,
         Self::CssFetch,
@@ -126,6 +155,7 @@ impl Phase {
         Self::LayoutGrid,
         Self::LayoutFlex,
         Self::LayoutIntrinsic,
+        Self::InlineTextCollect,
         Self::GeometryFinalize,
         Self::GeometryContainerQueries,
         Self::FrameUpdate,
@@ -150,6 +180,9 @@ impl Phase {
         Self::PlatformDraw,
         Self::PlatformConvert,
         Self::PlatformPresent,
+        Self::PlatformImageCreate,
+        Self::PlatformUpload,
+        Self::PlatformCommit,
         Self::VideoLayerPresent,
         Self::ScrollPaint,
         Self::RasterFill,
@@ -167,6 +200,8 @@ impl Phase {
         Self::FramePaintSvgAnimation,
         Self::FramePaintVideo,
         Self::FramePaintOther,
+        Self::BrowserIdle,
+        Self::BrowserVideoSelection,
     ];
 
     pub fn name(self) -> &'static str {
@@ -206,6 +241,7 @@ impl Phase {
             Self::LayoutGrid => "layout_grid",
             Self::LayoutFlex => "layout_flex",
             Self::LayoutIntrinsic => "layout_intrinsic",
+            Self::InlineTextCollect => "inline_text_collect",
             Self::GeometryFinalize => "geometry_finalize",
             Self::GeometryContainerQueries => "geometry_container_queries",
             Self::FrameUpdate => "frame_update",
@@ -230,6 +266,9 @@ impl Phase {
             Self::PlatformDraw => "platform_draw",
             Self::PlatformConvert => "platform_convert",
             Self::PlatformPresent => "platform_present",
+            Self::PlatformImageCreate => "platform_image_create",
+            Self::PlatformUpload => "platform_upload",
+            Self::PlatformCommit => "platform_commit",
             Self::VideoLayerPresent => "video_layer_present",
             Self::ScrollPaint => "scroll_paint",
             Self::RasterFill => "raster_fill",
@@ -247,6 +286,8 @@ impl Phase {
             Self::FramePaintSvgAnimation => "frame_paint_svg_animation",
             Self::FramePaintVideo => "frame_paint_video",
             Self::FramePaintOther => "frame_paint_other",
+            Self::BrowserIdle => "browser_idle",
+            Self::BrowserVideoSelection => "browser_video_selection",
         }
     }
 }

@@ -480,6 +480,17 @@ fn decode_reader_with_previews_and_bytes<R: Read>(
         bytes: prefix.to_vec(),
         position: 0,
     })));
+    if prefix.starts_with(&[0xff, 0x0a]) || prefix.starts_with(b"\0\0\0\x0cJXL ") {
+        let image = webmedia::bitmap::jpeg_xl::decode_stream(
+            capture.clone(),
+            &mut on_dimensions,
+            |image| on_preview(DecodedImage::Raster(Arc::new(image.rgba), image.width, image.height)),
+        )?;
+        let mut state = capture.0.lock().unwrap();
+        let CaptureState { source, bytes, .. } = &mut *state;
+        source.read_to_end(bytes).map_err(|error| error.to_string())?;
+        return Ok((DecodedImage::Raster(Arc::new(image.rgba), image.width, image.height), std::mem::take(bytes)));
+    }
     if &prefix == PNG_MAGIC {
         if let Ok(Some(decoded)) =
             decode_png_rows(capture.clone(), &mut on_dimensions, &mut on_preview)
@@ -515,7 +526,9 @@ fn decode_reader_with_previews_and_bytes<R: Read>(
             on_dimensions(width, height);
         }
     } else if prefix.starts_with(b"GIF87a") || prefix.starts_with(b"GIF89a") {
-        if let Ok(decoder) = image::codecs::gif::GifDecoder::new(BufReader::new(capture.clone())) {
+        if let Ok(reader) = super::gif_reader::reader(capture.clone())
+            && let Ok(decoder) = image::codecs::gif::GifDecoder::new(reader)
+        {
             let (width, height) = image::ImageDecoder::dimensions(&decoder);
             on_dimensions(width, height);
             if (width as u64) * (height as u64) <= MAX_PREVIEW_PIXELS
@@ -571,7 +584,7 @@ pub(crate) fn fetch_decode_with_previews_cached(
             .get(url)
             .header(
                 "Accept",
-                "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+                "image/jxl,image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
             )
             .header("Sec-Fetch-Dest", "image")
             .header("Sec-Fetch-Mode", "no-cors")
@@ -602,6 +615,38 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[test]
+    fn palette_free_gif_stream_publishes_transparent_preview_and_final() {
+        let bytes = super::super::image_data_url_bytes(
+            "data:image/gif;base64,R0lGODlhAQABAHAAACH5BAEAAAAALAAAAAABAAEAAAICRAEAOw==",
+        )
+        .unwrap();
+        let mut previews = 0;
+        let (final_image, captured) = decode_reader_with_previews_and_bytes(
+            bytes.as_slice(),
+            |width, height| assert_eq!((width, height), (1, 1)),
+            |image| {
+                previews += 1;
+                let DecodedImage::Raster(pixels, width, height) = image else {
+                    panic!("expected preview")
+                };
+                assert_eq!((width, height), (1, 1));
+                assert_eq!(pixels.as_slice(), &[0, 0, 0, 0]);
+            },
+        )
+        .unwrap();
+        assert_eq!(previews, 1);
+        assert_eq!(
+            captured, bytes,
+            "virtual palette must not rewrite cached bytes"
+        );
+        let DecodedImage::Raster(pixels, width, height) = final_image else {
+            panic!("expected final")
+        };
+        assert_eq!((width, height), (1, 1));
+        assert_eq!(pixels.as_slice(), &[0, 0, 0, 0]);
+    }
+
     struct ChunkedReader {
         bytes: Vec<u8>,
         position: usize,
@@ -616,6 +661,27 @@ mod tests {
             self.consumed.store(self.position, Ordering::SeqCst);
             Ok(count)
         }
+    }
+
+    #[test]
+    fn jpeg_xl_stream_reports_dimensions_and_preserves_cached_bytes() {
+        let bytes = include_bytes!("../../../webmedia/tests/fixtures/jxl-alpha.jxl").to_vec();
+        let consumed = Arc::new(AtomicUsize::new(0));
+        let reader = ChunkedReader { bytes: bytes.clone(), position: 0, consumed: consumed.clone() };
+        let mut dimensions = None;
+        let (decoded, captured) = decode_reader_with_previews_and_bytes(
+            reader,
+            |width, height| {
+                assert!(consumed.load(Ordering::SeqCst) < bytes.len());
+                dimensions = Some((width, height));
+            },
+            |preview| { assert!(matches!(preview, DecodedImage::Raster(..))); },
+        ).unwrap();
+        let DecodedImage::Raster(pixels, width, height) = decoded else { panic!("expected raster"); };
+        let regular = webmedia::bitmap::decode_raster(&bytes).unwrap();
+        assert_eq!(dimensions, Some((width, height)));
+        assert_eq!(pixels.as_slice(), regular.rgba);
+        assert_eq!(captured, bytes);
     }
 
     #[test]

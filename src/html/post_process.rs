@@ -430,6 +430,10 @@ pub fn resolve_picture_elements_for_device_pixel_ratio(
         return;
     } else if node.tag == "img" {
         resolve_img_source_for_device_pixel_ratio(node, base_url, vw, vh, device_pixel_ratio);
+    } else if node.is_image_element() {
+        if let Some(src) = node.attributes.get("src").cloned() {
+            apply_resolved_image_source(node, &src, base_url, None);
+        }
     }
     for child in &mut node.children {
         resolve_picture_elements_for_device_pixel_ratio(
@@ -453,6 +457,12 @@ pub(crate) fn resolve_img_source_for_device_pixel_ratio(
     vh: f32,
     device_pixel_ratio: f32,
 ) {
+    if node.tag == "input" && node.is_image_element() {
+        if let Some(src) = node.attributes.get("src").cloned() {
+            apply_resolved_image_source(node, &src, base_url, None);
+        }
+        return;
+    }
     if let Some(srcset) = image_srcset_source(node) {
         let sizes = node.attributes.get("sizes").map(|s| s.as_str());
         if let Some(best) = parse_srcset_url_for(srcset, sizes, vw, vh, device_pixel_ratio) {
@@ -487,7 +497,11 @@ fn apply_resolved_image_source(
     }
 
     if changed {
+        node.image_is_fallback = false;
         node.image_data = None;
+        node.svg_document = None;
+        node.svg_viewbox_w = 0.0;
+        node.svg_viewbox_h = 0.0;
         node.image_data_width = 0;
         node.image_data_height = 0;
         node.animated_image = None;

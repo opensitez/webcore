@@ -8,6 +8,15 @@ use crate::dom::*;
 use crate::html::*;
 use std::collections::{HashMap, HashSet};
 
+fn adjacent_grapheme_offset(value: &str, cursor: usize, forward: bool) -> usize {
+    let byte = value
+        .char_indices()
+        .nth(cursor)
+        .map_or(value.len(), |(at, _)| at);
+    let boundary = crate::dom::adjacent_grapheme_boundary(value, byte, forward);
+    value[..boundary].chars().count()
+}
+
 /// Returns true if this element is a text-editable form input.
 /// What put this element in the **top layer** (CSS Position §6, HTML §4.11.4
 /// and §6.12).
@@ -118,6 +127,12 @@ pub fn is_text_input(node: &WebCore) -> bool {
     }
 }
 
+pub(crate) fn input_uses_minimum_normal_line_height(input_type: &str) -> bool {
+    ["text", "search", "password", "email", "url", "tel"]
+        .iter()
+        .any(|kind| input_type.eq_ignore_ascii_case(kind))
+}
+
 /// A form control's **value** (HTML §4.10.18.1).
 ///
 /// The single read point for every consumer — the paint path, form submission,
@@ -145,12 +160,75 @@ pub fn input_value(node: &WebCore) -> String {
 }
 
 /// Process a key event on a focused form input. Returns true if the value changed.
+fn form_input_maxlength(node: &WebCore) -> Option<usize> {
+    node.attributes
+        .get("maxlength")
+        .filter(|_| {
+            node.tag == "textarea"
+                || crate::html::forms::supports_text_length_constraints(
+                    node.attributes.get("type").map_or("text", String::as_str),
+                )
+        })
+        .and_then(|value| crate::html::forms::parse_non_negative_integer(value))
+        .map(|length| length as usize)
+}
+
+pub(crate) fn replace_form_input_selection(node: &mut WebCore, replacement: &str) -> bool {
+    if !is_text_input(node)
+        || node.attributes.contains_key("disabled")
+        || node.attributes.contains_key("readonly")
+    {
+        return false;
+    }
+    let mut value = input_value(node);
+    let len = value.chars().count();
+    let start = node.input_cursor.min(node.input_sel_anchor).min(len);
+    let end = node.input_cursor.max(node.input_sel_anchor).min(len);
+    let byte_start = value
+        .char_indices()
+        .nth(start)
+        .map_or(value.len(), |(at, _)| at);
+    let byte_end = value
+        .char_indices()
+        .nth(end)
+        .map_or(value.len(), |(at, _)| at);
+    let retained_units =
+        value[..byte_start].encode_utf16().count() + value[byte_end..].encode_utf16().count();
+    let mut available =
+        form_input_maxlength(node).map_or(usize::MAX, |limit| limit.saturating_sub(retained_units));
+    let normalized = replacement.replace("\r\n", "\n").replace('\r', "\n");
+    let mut inserted = String::new();
+    for ch in normalized.chars() {
+        if node.tag != "textarea" && ch == '\n' {
+            continue;
+        }
+        if ch.len_utf16() > available {
+            break;
+        }
+        inserted.push(ch);
+        available -= ch.len_utf16();
+    }
+    if start == end && inserted.is_empty() {
+        return false;
+    }
+    value.replace_range(byte_start..byte_end, &inserted);
+    node.input_cursor = start + inserted.chars().count();
+    node.input_sel_anchor = node.input_cursor;
+    node.input_sel_direction = SelectionDirection::None;
+    node.value_state = Some(value);
+    node.dirty_value = true;
+    if node.tag == "textarea" || node.style.field_sizing.eq_ignore_ascii_case("content") {
+        node.layout.layout_dirty = true;
+    }
+    true
+}
+
 pub fn process_form_input_key(
     node: &mut WebCore,
     key_code: u32,
     ch: Option<char>,
     ctrl: bool,
-    _shift: bool,
+    shift: bool,
 ) -> bool {
     if !is_text_input(node) {
         return false;
@@ -172,16 +250,44 @@ pub fn process_form_input_key(
     let sel_end = cursor.max(anchor);
     let mut new_cursor = cursor;
     let mut changed = false;
-    let maxlength: Option<usize> = node
-        .attributes
-        .get("maxlength")
-        .and_then(|s| s.parse().ok());
+    let maxlength = form_input_maxlength(node);
+    // Selection offsets are scalar indices; HTML length limits use UTF-16 units.
+    let insertion_fits = |inserted: char| {
+        maxlength.is_none_or(|limit| {
+            value.encode_utf16().count()
+                - value
+                    .chars()
+                    .skip(sel_start)
+                    .take(sel_end - sel_start)
+                    .map(char::len_utf16)
+                    .sum::<usize>()
+                + inserted.len_utf16()
+                <= limit
+        })
+    };
+    let insertion_allowed = match (key_code, ch) {
+        (13, _) => insertion_fits('\n'),
+        (_, Some(ch)) => insertion_fits(ch),
+        _ => true,
+    };
 
     // Ctrl+A: select all
     if ctrl && (key_code == 65 || ch == Some('a') || ch == Some('A')) {
         node.input_sel_anchor = 0;
         node.input_cursor = len;
+        node.input_sel_direction = SelectionDirection::Forward;
         return true; // cursor moved, no content change
+    }
+    if is_readonly
+        && (matches!(key_code, 8 | 13 | 46) || ch.is_some_and(|ch| !ch.is_control() && !ctrl))
+    {
+        return false;
+    }
+
+    if !matches!(key_code, 8 | 13 | 35..=37 | 39 | 46)
+        && !ch.is_some_and(|ch| !ch.is_control() && !ctrl)
+    {
+        return false;
     }
 
     // Helper: delete selected range
@@ -208,9 +314,10 @@ pub fn process_form_input_key(
                     new_cursor = delete_selection(&mut value, sel_start, sel_end);
                     changed = true;
                 } else if cursor > 0 {
+                    let previous = adjacent_grapheme_offset(&value, cursor, false);
                     let byte_pos = value
                         .char_indices()
-                        .nth(cursor - 1)
+                        .nth(previous)
                         .map(|(i, _)| i)
                         .unwrap_or(0);
                     let byte_end = value
@@ -219,7 +326,7 @@ pub fn process_form_input_key(
                         .map(|(i, _)| i)
                         .unwrap_or(value.len());
                     value.replace_range(byte_pos..byte_end, "");
-                    new_cursor = cursor - 1;
+                    new_cursor = previous;
                     changed = true;
                 }
             }
@@ -238,7 +345,7 @@ pub fn process_form_input_key(
                         .unwrap_or(value.len());
                     let byte_end = value
                         .char_indices()
-                        .nth(cursor + 1)
+                        .nth(adjacent_grapheme_offset(&value, cursor, true))
                         .map(|(i, _)| i)
                         .unwrap_or(value.len());
                     value.replace_range(byte_pos..byte_end, "");
@@ -248,35 +355,62 @@ pub fn process_form_input_key(
         }
         37 => {
             // Left arrow
-            if cursor > 0 {
-                new_cursor = cursor - 1;
+            if has_selection && !shift {
+                new_cursor = sel_start;
+            } else if cursor > 0 {
+                new_cursor = adjacent_grapheme_offset(&value, cursor, false);
             }
         }
         39 => {
             // Right arrow
-            if cursor < len {
-                new_cursor = cursor + 1;
+            if has_selection && !shift {
+                new_cursor = sel_end;
+            } else if cursor < len {
+                new_cursor = adjacent_grapheme_offset(&value, cursor, true);
             }
         }
         36 => {
             // Home
-            new_cursor = 0;
+            new_cursor = if is_textarea && !ctrl {
+                value
+                    .chars()
+                    .take(cursor)
+                    .enumerate()
+                    .filter_map(|(i, ch)| (ch == '\n').then_some(i + 1))
+                    .last()
+                    .unwrap_or(0)
+            } else {
+                0
+            };
         }
         35 => {
             // End
-            new_cursor = len;
+            new_cursor = if is_textarea && !ctrl {
+                cursor
+                    + value
+                        .chars()
+                        .skip(cursor)
+                        .position(|ch| ch == '\n')
+                        .unwrap_or(len - cursor)
+            } else {
+                len
+            };
         }
         13 => {
             // Enter
             if is_textarea && !is_readonly {
-                if maxlength.map(|m| len < m).unwrap_or(true) {
+                if has_selection {
+                    new_cursor = delete_selection(&mut value, sel_start, sel_end);
+                    changed = true;
+                }
+                if insertion_allowed {
                     let byte_pos = value
                         .char_indices()
-                        .nth(cursor)
+                        .nth(new_cursor)
                         .map(|(i, _)| i)
                         .unwrap_or(value.len());
                     value.insert(byte_pos, '\n');
-                    new_cursor = cursor + 1;
+                    new_cursor += 1;
                     changed = true;
                 }
             }
@@ -288,9 +422,9 @@ pub fn process_form_input_key(
                     // Delete selection first if any
                     if has_selection {
                         new_cursor = delete_selection(&mut value, sel_start, sel_end);
+                        changed = true;
                     }
-                    let cur_len = value.chars().count();
-                    if maxlength.map(|m| cur_len < m).unwrap_or(true) {
+                    if insertion_allowed {
                         let byte_pos = value
                             .char_indices()
                             .nth(new_cursor)
@@ -306,10 +440,15 @@ pub fn process_form_input_key(
     }
 
     node.input_cursor = new_cursor;
-    node.input_sel_anchor = new_cursor;
-    // The keystroke collapsed the selection; the direction it was made in is
-    // gone with it.
-    node.input_sel_direction = SelectionDirection::None;
+    let extending = shift && matches!(key_code, 35..=37 | 39);
+    node.input_sel_anchor = if extending { anchor } else { new_cursor };
+    node.input_sel_direction = if node.input_cursor < node.input_sel_anchor {
+        SelectionDirection::Backward
+    } else if node.input_cursor > node.input_sel_anchor {
+        SelectionDirection::Forward
+    } else {
+        SelectionDirection::None
+    };
 
     if changed {
         // Typing sets the VALUE and raises the dirty value flag (HTML
@@ -318,7 +457,9 @@ pub fn process_form_input_key(
         // what a form reset restores and what the serializer round-trips.
         node.value_state = Some(value);
         node.dirty_value = true;
-        node.layout.layout_dirty = true;
+        if is_textarea || node.style.field_sizing.eq_ignore_ascii_case("content") {
+            node.layout.layout_dirty = true;
+        }
     }
 
     changed || key_code == 37 || key_code == 39 || key_code == 36 || key_code == 35

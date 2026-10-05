@@ -15,6 +15,12 @@ use std::sync::Arc;
 pub enum PickerKind {
     Color,
     Calendar,
+    Month,
+    Time,
+}
+
+impl PickerKind {
+    pub(crate) const FRAME_INSET_PX: f32 = 4.0;
 }
 
 #[derive(Clone, Debug)]
@@ -44,6 +50,7 @@ pub enum PendingImageResult {
         node_id: u32,
         path: Vec<usize>,
         target: PendingImageTarget,
+        url: String,
         width: u32,
         height: u32,
     },
@@ -141,6 +148,8 @@ pub struct Document {
     pub stylesheet: Stylesheet,
     pub title: String,
     pub base_url: String,
+    /// Current document URL when navigation differs from its resource base.
+    pub(crate) navigation_url: Option<String>,
 
     // ── Arena-based DOM (bridge period: mirrors WebCore tree) ────────────────
     /// Arena-based DOM tree with stable NodeId identity.
@@ -234,6 +243,10 @@ pub struct Document {
     pub focused_box: u32,
     /// Element hit on last MouseDown — used to fire Click on MouseUp if same target.
     pub mousedown_target: u32,
+    /// Accepted primary click awaiting the browser's navigation/submission default action.
+    pub(crate) pointer_activation_target: Option<u32>,
+    pub(crate) keyboard_activation_target: Option<u32>,
+    pub(crate) keyboard_space_target: u32,
     /// Last click target + time for DblClick detection.
     pub last_click_target: u32,
     pub last_click_time: Option<std::time::Instant>,
@@ -277,6 +290,9 @@ pub struct Document {
     /// light dismiss need; `WebCore::top_layer_kind` is the per-node mirror
     /// the selector matcher reads, and both are written in one place.
     pub top_layer: Vec<u32>,
+    pub(crate) dialog_states: HashMap<u32, crate::dom::dialog::DialogState>,
+    pub(crate) listbox_anchors: HashMap<u32, u32>,
+    pub(crate) listbox_active_options: HashMap<u32, u32>,
     /// Set while `split_text` runs. The split has its OWN range rule, and the
     /// generic insert/replace-data hooks its internals would otherwise fire
     /// would apply a second, wrong adjustment on top of it.
@@ -300,6 +316,8 @@ pub struct Document {
     /// the dropdown already is; there is one popup surface here and this is a
     /// second thing on it, not a new mechanism.
     pub open_picker: u32,
+    pub(crate) picker_calendar: Option<(i32, u32)>,
+    pub(crate) picker_time: Option<crate::widgets::TimePicker>,
     /// The `<input type=range>` whose knob the pointer is holding (0 = none).
     ///
     /// A slider is the one control whose interaction is the pointer's whole
@@ -321,6 +339,7 @@ pub struct Document {
     pub range_drag_origin: String,
     /// Hovered option index in open dropdown (-1 = none).
     pub dropdown_hover_idx: i32,
+    pub(crate) dropdown_scroll: f32,
     /// Form event callback — set by the host to handle form interactions.
     /// Called when users interact with form elements (click checkbox, type in input, etc.).
     pub on_form_event: Option<FormEventCallback>,
@@ -455,7 +474,24 @@ impl Document {
         let (w, h) = match self.picker_kind(id) {
             Some(PickerKind::Calendar) => (
                 crate::widgets::Calendar::width(),
-                crate::widgets::Calendar::height(),
+                crate::widgets::Calendar::height()
+                    + if node
+                        .attributes
+                        .get("type")
+                        .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("datetime-local"))
+                    {
+                        crate::widgets::TimePicker::HEIGHT
+                    } else {
+                        0.0
+                    },
+            ),
+            Some(PickerKind::Month) => (
+                crate::widgets::Calendar::width(),
+                crate::widgets::MonthGrid::height(),
+            ),
+            Some(PickerKind::Time) => (
+                crate::widgets::Calendar::width(),
+                crate::widgets::TimePicker::HEIGHT,
             ),
             _ => {
                 let cols = crate::widgets::PALETTE_COLUMNS as f32;
@@ -464,7 +500,74 @@ impl Document {
                 (cols * cell, rows * cell)
             }
         };
-        Some((br.x, br.y + br.h, w, h))
+        let inset = PickerKind::FRAME_INSET_PX;
+        let x = if self.viewport_w.is_finite() && self.viewport_w > 0.0 {
+            br.x.clamp(
+                self.scroll_x + inset,
+                (self.scroll_x + self.viewport_w - w - inset).max(self.scroll_x + inset),
+            )
+        } else {
+            br.x
+        };
+        let below = br.bottom();
+        let y = if self.viewport_h.is_finite() && self.viewport_h > 0.0 {
+            let top = self.scroll_y + inset;
+            let bottom = self.scroll_y + self.viewport_h - inset;
+            if below + h <= bottom {
+                below.max(top)
+            } else if br.y - h >= top {
+                br.y - h
+            } else {
+                below.clamp(top, (bottom - h).max(top))
+            }
+        } else {
+            below
+        };
+        Some((x, y, w, h))
+    }
+
+    pub(crate) fn calendar_picker_height(&self, id: u32) -> Option<f32> {
+        match self.picker_kind(id)? {
+            PickerKind::Calendar => Some(crate::widgets::Calendar::height()),
+            PickerKind::Month => Some(crate::widgets::MonthGrid::height()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn time_picker_rect(&self, id: u32) -> Option<(f32, f32, f32, f32)> {
+        self.picker_time.as_ref()?;
+        if self.open_picker != id {
+            return None;
+        }
+        let (x, y, w, _) = self.picker_rect(id)?;
+        Some((
+            x,
+            y + self.calendar_picker_height(id).unwrap_or(0.0),
+            w,
+            crate::widgets::TimePicker::HEIGHT,
+        ))
+    }
+
+    pub(crate) fn time_picker_value(&self, id: u32) -> Option<String> {
+        let time = self.picker_time.as_ref()?.value();
+        let node = self.find_webcore(id)?;
+        if node
+            .attributes
+            .get("type")
+            .is_some_and(|kind| kind.trim().eq_ignore_ascii_case("datetime-local"))
+        {
+            let old = input_value(node);
+            let date = old
+                .split_once('T')
+                .map(|(date, _)| date.to_owned())
+                .unwrap_or_else(|| {
+                    let (year, month, day) = crate::html::temporal::current_utc_date();
+                    crate::widgets::to_date_value(year, month, day)
+                });
+            Some(format!("{date}T{time}"))
+        } else {
+            Some(time)
+        }
     }
 
     /// True if any CSS animation or transition is active or requesting animation frames.
@@ -489,11 +592,9 @@ impl Document {
             .as_str()
         {
             "color" => Some(PickerKind::Color),
-            // `month` and `week` open a calendar too in a browser, but they
-            // pick a MONTH and a WEEK, not a day — a day grid would write a
-            // value their format cannot hold. Until each has its own grid,
-            // `datetime-local` picks a day too and retains its time component.
-            "date" | "datetime-local" => Some(PickerKind::Calendar),
+            "month" => Some(PickerKind::Month),
+            "time" => Some(PickerKind::Time),
+            "date" | "week" | "datetime-local" => Some(PickerKind::Calendar),
             _ => None,
         }
     }
@@ -505,11 +606,8 @@ impl Document {
     /// interaction — the drop-down's `open_select` state machine is never
     /// involved. Which algorithm runs depends on the control:
     ///
-    /// * `multiple` — **toggle** the row (HTML §4.10.7: "the user agent should
-    ///   allow the user to toggle the selectedness of the option elements").
-    ///   Toggling on a plain click is the only way to reach a multi-selection
-    ///   at a seam with no modifier keys, and it is what the
-    ///   `CheckedListBox` this renders for does anyway.
+    /// * `multiple` — replace on plain click, toggle with Ctrl/Command,
+    ///   or extend a range from the last clicked option with Shift.
     /// * single-select — **pick an option**, the algorithm a drop-down runs.
     ///
     /// `unselect_request` is the third case, and it is the one HTML words as a
@@ -518,18 +616,17 @@ impl Document {
     /// also allow the user to request that the option whose selectedness is
     /// true, if any, be unselected."
     ///
-    /// A SINGLE-SELECT list box only. A drop-down has no such affordance (its
-    /// display size is 1) and a `multiple` list box already reaches an empty
-    /// selection by toggling, so binding it there would be a second way to do
-    /// one thing. The gesture is the platform's — ctrl/⌘-click on the row that
-    /// is already selected — which is why it arrives as an answered question
-    /// rather than being decided here.
+    /// In a single-select listbox Ctrl/Command can clear the selected row.
     pub(crate) fn click_list_box_row(
         &mut self,
         select_id: u32,
         click_y: f32,
         unselect_request: bool,
+        extend_range: bool,
     ) -> bool {
+        if self.is_actually_disabled(select_id) {
+            return false;
+        }
         let Some(select) = self.find_webcore(select_id) else {
             return false;
         };
@@ -537,7 +634,9 @@ impl Document {
             return false;
         }
         let content = select.layout.content_rect;
-        let font_px = select.style.font_size_px(16.0, 16.0).max(1.0);
+        let initial = ComputedStyle::INITIAL_FONT_SIZE_PX;
+        let root_font = self.root.style.font_size_px(initial, initial);
+        let font_px = select.style.font_size_px(root_font, root_font).max(1.0);
         let options = crate::html::forms::option_ids(select);
         let Some(row) = crate::html::forms::list_box_row_at(
             content.y,
@@ -545,10 +644,47 @@ impl Document {
             font_px,
             options.len(),
             click_y,
+            select.layout.scroll_top,
         ) else {
             return false;
         };
         let option_id = options[row];
+        self.select_list_box_option(select_id, option_id, unselect_request, extend_range)
+    }
+
+    /// Shared pointer/keyboard selection gesture; reset attributes remain untouched.
+    pub(crate) fn select_list_box_option(
+        &mut self,
+        select_id: u32,
+        option_id: u32,
+        unselect_request: bool,
+        extend_range: bool,
+    ) -> bool {
+        if self.is_actually_disabled(select_id) || self.is_inert(select_id) {
+            return false;
+        }
+        let Some(select) = self.find_webcore(select_id) else {
+            return false;
+        };
+        let anchor = self
+            .listbox_anchors
+            .get(&select_id)
+            .copied()
+            .unwrap_or_else(|| {
+                crate::html::forms::list_of_options(select)
+                    .into_iter()
+                    .find(|o| o.selectedness)
+                    .map_or(option_id, |o| o.node_id)
+            });
+        let mut disabled = true;
+        crate::html::forms::for_each_option(select, &mut |o, group_disabled| {
+            if o.node_id == option_id {
+                disabled = crate::html::forms::option_is_disabled(o, group_disabled);
+            }
+        });
+        if disabled {
+            return false;
+        }
 
         let Some(select_mut) = self.find_webcore_mut(select_id) else {
             return false;
@@ -566,12 +702,29 @@ impl Document {
         let changed = if unselect_request && !multiple && already_selected {
             crate::html::forms::unselect_option(select_mut, option_id)
         } else if multiple {
-            crate::html::forms::toggle_option(select_mut, option_id)
+            if extend_range {
+                crate::html::forms::select_option_range(
+                    select_mut,
+                    anchor,
+                    option_id,
+                    unselect_request,
+                )
+            } else if unselect_request {
+                crate::html::forms::toggle_option(select_mut, option_id)
+            } else {
+                crate::html::forms::select_option_range(select_mut, option_id, option_id, false)
+            }
         } else {
             crate::html::forms::pick_option(select_mut, option_id)
         };
+        self.listbox_active_options.insert(select_id, option_id);
+        if extend_range {
+            self.listbox_anchors.entry(select_id).or_insert(anchor);
+        } else {
+            self.listbox_anchors.insert(select_id, option_id);
+        }
         if changed {
-            select_mut.layout.layout_dirty = true;
+            self.style_dirty = true;
             self.send_select_update_notifications(select_id);
         }
         changed
@@ -595,6 +748,9 @@ impl Document {
     /// toward it. Both are user-agent choices; this is the one browsers make.
     /// Dragging needs `mouse_move` wired to the same path.
     pub(crate) fn drag_range_to(&mut self, input_id: u32, doc_pt: (f32, f32)) -> bool {
+        if self.is_actually_disabled(input_id) {
+            return false;
+        }
         let Some(input) = self.find_webcore(input_id) else {
             return false;
         };
@@ -785,13 +941,179 @@ impl Document {
     /// current month when it has none — which is what a browser opens on.
     pub(crate) fn picker_month(&self, id: u32) -> (i32, u32, Option<u32>) {
         let value = self.find_webcore(id).map(input_value).unwrap_or_default();
-        match crate::widgets::parse_date(value.split('T').next().unwrap_or(&value)) {
-            Some((y, m, d)) => (y, m, Some(d)),
-            // No date library here, and none needed: an empty control opens on
-            // a fixed, obviously-neutral month rather than pretending to know
-            // today. The value it writes is a real date either way.
-            None => (2026, 1, None),
+        let parsed = crate::widgets::parse_date(value.split('T').next().unwrap_or(&value))
+            .or_else(|| {
+                crate::html::temporal::month_parts(&value)
+                    .and_then(|(y, m)| Some((y.parse().ok()?, m, 1)))
+            })
+            .or_else(|| crate::html::temporal::week_date(&value));
+        let (year, month, selected) = parsed.map_or_else(
+            || {
+                let (y, m, _) = crate::html::temporal::current_utc_date();
+                (y, m, None)
+            },
+            |(y, m, d)| (y, m, Some(d)),
+        );
+        if self.open_picker == id {
+            if let Some((y, m)) = self.picker_calendar {
+                return (
+                    y,
+                    m,
+                    ((y, m) == (year, month)).then_some(selected).flatten(),
+                );
+            }
         }
+        (year, month, selected)
+    }
+
+    pub(crate) fn navigate_picker(&mut self, id: u32, point: (f32, f32)) -> bool {
+        if !matches!(
+            self.picker_kind(id),
+            Some(PickerKind::Calendar | PickerKind::Month)
+        ) {
+            return false;
+        }
+        let Some((x, y, _, _)) = self.picker_rect(id) else {
+            return false;
+        };
+        let Some(delta) = crate::widgets::Calendar::navigation_at((point.0 - x, point.1 - y))
+        else {
+            return false;
+        };
+        let (year, month, _) = self.picker_month(id);
+        let next = if self.picker_kind(id) == Some(PickerKind::Month) {
+            year.checked_add(delta)
+                .filter(|y| *y > 0)
+                .map(|y| (y, month))
+        } else {
+            let index = i64::from(year) * 12 + i64::from(month) - 1 + i64::from(delta);
+            i32::try_from(index.div_euclid(12))
+                .ok()
+                .filter(|y| *y > 0)
+                .map(|y| (y, (index.rem_euclid(12) + 1) as u32))
+        };
+        if let Some(next) = next {
+            self.picker_calendar = Some(next);
+        }
+        true
+    }
+
+    pub(crate) fn month_hit(&self, id: u32, point: (f32, f32)) -> Option<String> {
+        let (x, y, _, _) = self.picker_rect(id)?;
+        let month = crate::widgets::MonthGrid::month_at((point.0 - x, point.1 - y))?;
+        let (year, _, _) = self.picker_month(id);
+        Some(format!("{year:04}-{month:02}"))
+    }
+
+    pub(crate) fn calendar_value(
+        &self,
+        id: u32,
+        year: i32,
+        month: u32,
+        day: u32,
+    ) -> Option<String> {
+        let node = self.find_webcore(id)?;
+        let kind = node.attributes.get("type")?.trim().to_ascii_lowercase();
+        if kind == "week" {
+            return crate::html::temporal::week_from_date(year, month, day);
+        }
+        let date = crate::widgets::to_date_value(year, month, day);
+        Some(if kind == "datetime-local" {
+            let old = input_value(node);
+            let time = self
+                .picker_time
+                .as_ref()
+                .map(|draft| draft.value())
+                .unwrap_or_else(|| {
+                    old.split_once('T')
+                        .map(|(_, time)| time.to_owned())
+                        .unwrap_or_else(|| "00:00".to_owned())
+                });
+            format!("{date}T{}", time)
+        } else {
+            date
+        })
+    }
+
+    pub(crate) fn picker_value_allowed(&self, id: u32, value: &str) -> bool {
+        if self.is_actually_disabled(id) || self.is_inert(id) {
+            return false;
+        }
+        let Some(node) = self.find_webcore(id) else {
+            return false;
+        };
+        if node.attributes.contains_key("readonly") {
+            return false;
+        }
+        if value.is_empty() {
+            return true;
+        }
+        let kind = node
+            .attributes
+            .get("type")
+            .map(|kind| kind.trim().to_ascii_lowercase())
+            .unwrap_or_default();
+        if crate::html::temporal::sanitize(&kind, value).is_some_and(|valid| valid.is_empty()) {
+            return false;
+        }
+        crate::html::temporal::constraints(
+            &kind,
+            value,
+            node.attributes.get("min").map(String::as_str),
+            node.attributes.get("max").map(String::as_str),
+            node.attributes.get("step").map(String::as_str),
+            node.attributes.get("value").map(String::as_str),
+        )
+        .is_none_or(|valid| !valid.underflow && !valid.overflow && !valid.step_mismatch)
+    }
+
+    pub(crate) fn commit_picker_value(&mut self, target: u32, value: &str) {
+        if !self.picker_value_allowed(target, value) || self.value(target) == value {
+            return;
+        }
+        self.set_value(target, value);
+        let (id, name) = self
+            .find_webcore(target)
+            .map(|node| {
+                (
+                    node.attributes.get("id").cloned().unwrap_or_default(),
+                    node.attributes.get("name").cloned().unwrap_or_default(),
+                )
+            })
+            .unwrap_or_default();
+        for event_type in ["input", "change"] {
+            let mut event = crate::dom::events::DomEvent::new(event_type, target);
+            self.dispatch_dom_event(&mut event);
+            if let Some(callback) = self.on_form_event.as_mut() {
+                callback(&FormEvent {
+                    tag: "input".into(),
+                    id: id.clone(),
+                    name: name.clone(),
+                    element: target,
+                    kind: if event_type == "input" {
+                        FormEventKind::Input(value.into())
+                    } else {
+                        FormEventKind::Change(value.into())
+                    },
+                });
+            }
+        }
+    }
+
+    pub(crate) fn picker_clear_hit(&self, id: u32, point: (f32, f32)) -> bool {
+        if !matches!(
+            self.picker_kind(id),
+            Some(PickerKind::Calendar | PickerKind::Month)
+        ) {
+            return false;
+        }
+        self.picker_rect(id).is_some_and(|(x, y, w, _)| {
+            let h = self.calendar_picker_height(id).unwrap_or(0.0);
+            point.0 >= x
+                && point.0 < x + w
+                && point.1 >= y + h - crate::widgets::Calendar::CELL
+                && point.1 < y + h
+        })
     }
 
     /// Which palette colour a point lands on, if any.
@@ -836,6 +1158,7 @@ impl Clone for Document {
             stylesheet: self.stylesheet.clone(),
             title: self.title.clone(),
             base_url: self.base_url.clone(),
+            navigation_url: self.navigation_url.clone(),
             arena: DomArena::new(), // cloned docs get fresh arena (rebuilt on demand)
             next_node_id: self.next_node_id,
             node_index: HashMap::new(), // rebuilt on demand
@@ -870,6 +1193,9 @@ impl Clone for Document {
             active_box: self.active_box,
             focused_box: self.focused_box,
             mousedown_target: self.mousedown_target,
+            pointer_activation_target: None,
+            keyboard_activation_target: None,
+            keyboard_space_target: 0,
             last_click_target: self.last_click_target,
             last_click_time: self.last_click_time,
             drag_source: self.drag_source,
@@ -885,6 +1211,9 @@ impl Clone for Document {
             traversals: crate::dom::traversal::TraversalStore::new(),
             ranges: self.ranges.clone(),
             top_layer: self.top_layer.clone(),
+            dialog_states: self.dialog_states.clone(),
+            listbox_anchors: self.listbox_anchors.clone(),
+            listbox_active_options: self.listbox_active_options.clone(),
             suppress_range_updates: false,
             viewport_w: self.viewport_w,
             viewport_h: self.viewport_h,
@@ -893,7 +1222,10 @@ impl Clone for Document {
             caret_blink_epoch: std::time::Instant::now(),
             open_select: 0,
             open_picker: 0,
+            picker_calendar: None,
+            picker_time: None,
             dropdown_hover_idx: -1,
+            dropdown_scroll: 0.0,
             // Transient interaction state, like the two popups beside it: a
             // fresh document is holding nothing.
             dragging_range: 0,

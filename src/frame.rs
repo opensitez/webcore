@@ -54,6 +54,25 @@ enum PendingVideoUpdate {
         node_id: u32,
         frames: Vec<crate::video::backend::VideoFrame>,
     },
+    WebmFrames {
+        node_id: u32,
+        generation: u64,
+        frames: Vec<crate::video::backend::VideoFrame>,
+    },
+}
+
+fn try_send_webm_update(
+    tx: &std::sync::mpsc::SyncSender<PendingVideoUpdate>,
+    update: PendingVideoUpdate,
+    generation: u64,
+) -> Result<bool, std::sync::mpsc::TrySendError<PendingVideoUpdate>> {
+    if matches!(&update, PendingVideoUpdate::WebmFrames { generation: old, .. }
+        if *old != generation)
+    {
+        return Ok(false);
+    }
+    // Only the independent video worker retries a full presentation channel.
+    tx.try_send(update).map(|()| true)
 }
 
 /// Callbacks the engine fires to notify the host of state changes.
@@ -88,6 +107,7 @@ pub(crate) struct FrameUpdate {
     pub rebuild_display_list: bool,
     pub paint_only_display_list_rebuild: bool,
     pub paint_rects: Vec<Rect>,
+    pub resource_paint_rects: Vec<Rect>,
 }
 
 fn mark_font_layout_dirty(node: &mut crate::types::WebCore) {
@@ -138,6 +158,7 @@ pub struct EngineFrame {
     video_update_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
     video_urgent_update_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
     scheduled_videos: std::collections::HashSet<(u32, String)>,
+    webm_playback: std::collections::HashMap<(u32, String), crate::video::playback::Playback>,
     pending_density_reselection: bool,
     cache_dir: Option<String>,
     resource_wake: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
@@ -185,9 +206,11 @@ impl EngineFrame {
             video_tx: None,
             video_rx: None,
             video_update_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            video_urgent_update_pending:
-                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            video_urgent_update_pending: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
             scheduled_videos: std::collections::HashSet::new(),
+            webm_playback: std::collections::HashMap::new(),
             pending_density_reselection: false,
             cache_dir: None,
             resource_wake: None,
@@ -263,6 +286,7 @@ impl EngineFrame {
         self.video_urgent_update_pending =
             std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.scheduled_videos.clear();
+        self.webm_playback.clear();
         self.first_paint_done = false;
         self.needs_style = true;
         self.needs_layout = true;
@@ -327,6 +351,7 @@ impl EngineFrame {
         let resource_poll_start = std::time::Instant::now();
         // 1. Poll for async stylesheets/images/fonts
         let now = std::time::Instant::now();
+        self.sync_webm_playback_controls();
         let mut resource_requested_relayout = false;
         if !scroll_priority {
             if self
@@ -354,6 +379,9 @@ impl EngineFrame {
                 if image_poll.needs_relayout {
                     resource_requested_relayout = true;
                 } else {
+                    update
+                        .resource_paint_rects
+                        .extend(image_poll.paint_rects.iter().copied());
                     // Display-list image commands capture the decoded buffer at
                     // build time. A fixed-size image that arrives inside the
                     // retained paint band needs fresh paint commands so the
@@ -394,7 +422,11 @@ impl EngineFrame {
                     };
                     match arrival {
                         PendingVideoUpdate::Metadata { node_id, metadata } => {
-                            if self.doc.media_apply_video_metadata(node_id, metadata) {
+                            if self.doc.tag_name(node_id) == Some("audio") {
+                                if let Some(state) = self.doc.media_states.get_mut(&node_id) {
+                                    state.duration = metadata.duration;
+                                }
+                            } else if self.doc.media_apply_video_metadata(node_id, metadata) {
                                 resource_requested_relayout = true;
                             }
                         }
@@ -405,6 +437,29 @@ impl EngineFrame {
                                 .is_some_and(|node| node.image_data.is_none());
                             if self.doc.media_queue_video_frames(node_id, frames) {
                                 if needs_first_frame {
+                                    if let Some(rect) =
+                                        video_paint_rect(&self.doc, node_id, self.viewport_h)
+                                    {
+                                        self.needs_paint = true;
+                                        update.paint_only_display_list_rebuild = true;
+                                        update.paint_rects.push(rect);
+                                    }
+                                }
+                            }
+                        }
+                        PendingVideoUpdate::WebmFrames {
+                            node_id,
+                            generation,
+                            frames,
+                        } => {
+                            if self.webm_playback.iter().any(|((id, _), playback)| {
+                                *id == node_id && playback.control.generation() == generation
+                            }) {
+                                let first = self
+                                    .doc
+                                    .find_webcore(node_id)
+                                    .is_some_and(|node| node.image_data.is_none());
+                                if self.doc.media_queue_video_frames(node_id, frames) && first {
                                     if let Some(rect) =
                                         video_paint_rect(&self.doc, node_id, self.viewport_h)
                                     {
@@ -507,9 +562,10 @@ impl EngineFrame {
             update.rebuild_display_list = true;
         }
 
-        if self.suspended_svg_scroll.is_some_and(|(x, y)| {
-            x != self.doc.scroll_x || y != self.doc.scroll_y
-        }) {
+        if self
+            .suspended_svg_scroll
+            .is_some_and(|(x, y)| x != self.doc.scroll_x || y != self.doc.scroll_y)
+        {
             self.doc.needs_animation_frame = true;
         }
 
@@ -561,11 +617,17 @@ impl EngineFrame {
                     std::time::Duration::ZERO,
                 );
             }
-            let (media_running, presented_video_ids) = self.doc.tick_media_with_frames(now);
+            let external_media_clocks = self.sync_webm_playback_controls();
+            let (media_running, presented_video_ids) = self
+                .doc
+                .tick_media_with_external_clocks(now, &external_media_clocks);
             let video_damage: Vec<_> = presented_video_ids
                 .into_iter()
                 .filter(|id| {
-                    !self.doc.find_webcore(*id).is_some_and(|node| node.external_video_overlay)
+                    !self
+                        .doc
+                        .find_webcore(*id)
+                        .is_some_and(|node| node.external_video_overlay)
                 })
                 .filter_map(|id| video_paint_rect(&self.doc, id, self.viewport_h))
                 .collect();
@@ -773,8 +835,7 @@ impl EngineFrame {
                 continue;
             }
             playing = true;
-            if !state.pending_video_frames.is_empty()
-                && self.media_visible_in_band(id, paint_band)
+            if !state.pending_video_frames.is_empty() && self.media_visible_in_band(id, paint_band)
             {
                 return false;
             }
@@ -1331,7 +1392,7 @@ impl EngineFrame {
         self.doc.root.children.clear();
         self.doc.rebuild_node_index();
         self.doc.base_url = base_url.to_string();
-        self.doc.stylesheet = crate::css::ua_stylesheet();
+        self.doc.stylesheet = crate::css::ua_sheet::ua_stylesheet_for_mode(self.doc.quirks);
         self.doc.preserve_stylesheet_document_order = true;
         let mut parser = crate::html::streaming::StreamingParser::new(base_url);
         parser.set_root_child_count(self.doc.root.children.len());
@@ -1346,6 +1407,7 @@ impl EngineFrame {
         self.video_tx = None;
         self.video_rx = None;
         self.scheduled_videos.clear();
+        self.webm_playback.clear();
         self.doc.pending_images = None;
         self.doc.images_in_flight = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         self.needs_style = true;
@@ -1519,7 +1581,11 @@ impl EngineFrame {
                             }
                             crate::types::PendingImageTarget::MaskLayer(layer_index) => {
                                 let _ = crate::html::set_decoded_mask_image_layer_for_url_on_node(
-                                    node, layer_index + 1, decoded, &url, &base_url,
+                                    node,
+                                    layer_index + 1,
+                                    decoded,
+                                    &url,
+                                    &base_url,
                                 );
                             }
                             _ => {}
@@ -1544,6 +1610,7 @@ impl EngineFrame {
                     let dimensions_tx = preview_tx.clone();
                     let dimensions_path = preview_path.clone();
                     let dimensions_wake = preview_wake.clone();
+                    let dimensions_url = src.to_string();
                     return crate::images::stream::fetch_decode_with_previews_cached(
                         src,
                         cache_dir.as_deref(),
@@ -1553,6 +1620,7 @@ impl EngineFrame {
                                     node_id,
                                     path: dimensions_path.clone(),
                                     target,
+                                    url: dimensions_url.clone(),
                                     width,
                                     height,
                                 });
@@ -1612,7 +1680,7 @@ impl EngineFrame {
         let Some(node) = crate::types::find_node_by_path_mut(&mut self.doc.root, path) else {
             return;
         };
-        if node.tag != "img" {
+        if !node.is_image_element() {
             return;
         }
         if let Some(w) = node
@@ -1648,9 +1716,66 @@ impl EngineFrame {
         }
     }
 
+    pub(crate) fn stop_media_playback(&mut self) {
+        self.webm_playback.clear();
+        self.video_tx = None;
+        self.video_rx = None;
+        self.scheduled_videos.clear();
+        self.video_update_pending
+            .store(false, std::sync::atomic::Ordering::Release);
+        self.video_urgent_update_pending
+            .store(false, std::sync::atomic::Ordering::Release);
+        for state in self.doc.media_states.values_mut() {
+            state.pending_video_frames.clear();
+        }
+    }
+
+    pub(crate) fn resume_media_playback(&mut self) {
+        self.schedule_unscheduled_document_videos();
+    }
+
+    fn sync_webm_playback_controls(&mut self) -> Vec<(u32, f32)> {
+        let mut clocks = Vec::new();
+        let keys: Vec<_> = self.webm_playback.keys().cloned().collect();
+        for key in keys {
+            let (node_id, url) = &key;
+            if self.doc.media_current_src(*node_id).as_ref() != Some(url) {
+                self.webm_playback.remove(&key);
+                self.scheduled_videos.remove(&key);
+                continue;
+            }
+            let looping = self.doc.media_loop(*node_id) == Some(true);
+            let is_video = self.doc.tag_name(*node_id) == Some("video");
+            if let Some(state) = self.doc.media_states.get_mut(node_id) {
+                let playback = self.webm_playback.get_mut(&key).unwrap();
+                if playback.update(
+                    state.current_time,
+                    state.paused,
+                    state.muted,
+                    state.volume,
+                    looping,
+                    state.playback_rate,
+                    state.seek_revision,
+                ) {
+                    state.pending_video_frames.clear();
+                }
+                let duration = if looping && is_video {
+                    None
+                } else {
+                    state.duration
+                };
+                if let Some(time) = playback.synchronize_audio_time(duration, looping) {
+                    state.current_time = time;
+                    clocks.push((*node_id, time));
+                }
+            }
+        }
+        clocks
+    }
+
     fn schedule_unscheduled_document_videos(&mut self) {
         fn collect(node: &crate::types::WebCore, ids: &mut Vec<u32>) {
-            if node.tag == "video" {
+            if matches!(node.tag.as_str(), "video" | "audio") {
                 ids.push(node.node_id);
             }
             for child in &node.children {
@@ -1671,14 +1796,21 @@ impl EngineFrame {
             };
             let source_path = url.split(['?', '#']).next().unwrap_or("");
             let is_y4m = source_path.ends_with(".y4m");
-            let is_mp4 = source_path.ends_with(".mp4");
+            let is_mp4 = source_path.ends_with(".mp4") || source_path.ends_with(".m4a");
             let is_webm = source_path.ends_with(".webm");
+            let managed_stream = is_webm || is_mp4;
+            if self.doc.tag_name(node_id) == Some("audio") && !managed_stream {
+                continue;
+            }
             if self.doc.media_autoplay(node_id) == Some(true)
                 && self.doc.media_paused(node_id) == Some(true)
+                && (!managed_stream || !self.scheduled_videos.contains(&(node_id, url.clone())))
             {
                 self.doc.media_play(node_id);
             }
-            if self.doc.media_paused(node_id) != Some(false)
+            let preload_media =
+                managed_stream && self.doc.media_preload(node_id).as_deref() != Some("none");
+            if (self.doc.media_paused(node_id) != Some(false) && !preload_media)
                 || !(is_y4m || is_mp4 || is_webm)
                 || !self.scheduled_videos.insert((node_id, url.clone()))
             {
@@ -1696,8 +1828,95 @@ impl EngineFrame {
             let pending = self.video_update_pending.clone();
             let urgent = self.video_urgent_update_pending.clone();
             let should_loop = self.doc.media_loop(node_id) == Some(true);
+            if managed_stream {
+                let time = self
+                    .doc
+                    .media_states
+                    .get(&node_id)
+                    .map_or(0.0, |state| state.current_time);
+                let (mut playback, pcm) = crate::video::playback::Playback::new(time);
+                if let Some(state) = self.doc.media_states.get(&node_id) {
+                    playback.update(
+                        time,
+                        state.paused,
+                        state.muted,
+                        state.volume,
+                        should_loop,
+                        state.playback_rate,
+                        state.seek_revision,
+                    );
+                }
+                let control = playback.control.clone();
+                self.webm_playback.insert((node_id, url.clone()), playback);
+                std::thread::spawn(move || {
+                    let open = || -> Option<Box<dyn std::io::Read + Send>> {
+                        if url.starts_with("http://") || url.starts_with("https://") {
+                            let response = crate::http_client().get(&url).send().ok()?;
+                            response
+                                .status()
+                                .is_success()
+                                .then(|| Box::new(response) as _)
+                        } else {
+                            std::fs::File::open(&url)
+                                .ok()
+                                .map(|file| Box::new(file) as _)
+                        }
+                    };
+                    let emit = |sample, stop: &std::sync::atomic::AtomicBool| {
+                        let update = match sample {
+                            crate::video::playback::VideoUpdate::Metadata(metadata) => {
+                                PendingVideoUpdate::Metadata { node_id, metadata }
+                            }
+                            crate::video::playback::VideoUpdate::Frame { generation, frame } => {
+                                PendingVideoUpdate::WebmFrames {
+                                    node_id,
+                                    generation,
+                                    frames: vec![frame],
+                                }
+                            }
+                        };
+                        let first = matches!(update, PendingVideoUpdate::Metadata { .. });
+                        let mut update = update;
+                        loop {
+                            if control.cancelled()
+                                || stop.load(std::sync::atomic::Ordering::Acquire)
+                            {
+                                return false;
+                            }
+                            match try_send_webm_update(&tx, update, control.generation()) {
+                                Ok(true) => break,
+                                Ok(false) => return true,
+                                Err(std::sync::mpsc::TrySendError::Full(value)) => {
+                                    update = value;
+                                    std::thread::sleep(std::time::Duration::from_millis(5));
+                                }
+                                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                                    return false;
+                                }
+                            }
+                        }
+                        pending.store(true, std::sync::atomic::Ordering::Release);
+                        if first {
+                            urgent.store(true, std::sync::atomic::Ordering::Release);
+                        }
+                        if let Some(wake) = &wake {
+                            wake();
+                        }
+                        true
+                    };
+                    if is_mp4 {
+                        crate::video::playback::decode_mp4(control.clone(), pcm, open, emit);
+                    } else {
+                        crate::video::playback::decode_webm(control.clone(), pcm, open, emit);
+                    }
+                });
+                continue;
+            }
             std::thread::spawn(move || {
                 use std::io::Read;
+
+                let trace_start = std::env::var_os("WEBCORE_TRACE_VIDEO_DELIVERY")
+                    .map(|_| std::time::Instant::now());
 
                 let open = || -> Option<Box<dyn Read + Send>> {
                     if url.starts_with("http://") || url.starts_with("https://") {
@@ -1735,10 +1954,30 @@ impl EngineFrame {
                         };
                         let mut input = Some(&bytes[..count]);
                         loop {
+                            let decode_start = trace_start.map(|_| std::time::Instant::now());
                             let frames = match decoder.push(input.take().unwrap_or(&[])) {
                                 Ok(frames) => frames,
-                                Err(_) => return,
+                                Err(error) => {
+                                    if let Some(start) = trace_start {
+                                        eprintln!(
+                                            "video decode error node={node_id} wall={:.3}: {error:?}",
+                                            start.elapsed().as_secs_f64()
+                                        );
+                                    }
+                                    return;
+                                }
                             };
+                            let decode_elapsed = decode_start.map(|start| start.elapsed());
+                            if frames.is_empty()
+                                && let (Some(start), Some(elapsed)) = (trace_start, decode_elapsed)
+                                && elapsed >= std::time::Duration::from_millis(100)
+                            {
+                                eprintln!(
+                                    "video reference decode node={node_id} wall={:.3} decode_ms={:.3}",
+                                    start.elapsed().as_secs_f64(),
+                                    elapsed.as_secs_f64() * 1000.0
+                                );
+                            }
                             if !metadata_sent {
                                 if let Some(metadata) = decoder.metadata() {
                                     if tx
@@ -1758,6 +1997,8 @@ impl EngineFrame {
                             for mut frame in frames {
                                 last_frame_time = Some(frame.timestamp);
                                 frame.timestamp += loop_start;
+                                let timestamp = frame.timestamp;
+                                let send_start = trace_start.map(|_| std::time::Instant::now());
                                 if tx
                                     .send(PendingVideoUpdate::Frames {
                                         node_id,
@@ -1766,6 +2007,16 @@ impl EngineFrame {
                                     .is_err()
                                 {
                                     return;
+                                }
+                                if let (Some(start), Some(decode_elapsed), Some(send_start)) =
+                                    (trace_start, decode_elapsed, send_start)
+                                {
+                                    eprintln!(
+                                        "video delivery node={node_id} wall={:.3} pts={timestamp:.3} decode_ms={:.3} channel_ms={:.3}",
+                                        start.elapsed().as_secs_f64(),
+                                        decode_elapsed.as_secs_f64() * 1000.0,
+                                        send_start.elapsed().as_secs_f64() * 1000.0
+                                    );
                                 }
                                 if !first_frame_sent {
                                     first_frame_sent = true;
@@ -1918,9 +2169,11 @@ impl EngineFrame {
                 }
             }
             if can_paint_resource
-                && (node.mask_images.as_ref().and_then(|images| {
-                    images.get_for_source(0, node.style.mask_source_key(0)?)
-                }).is_none()
+                && (node
+                    .mask_images
+                    .as_ref()
+                    .and_then(|images| images.get_for_source(0, node.style.mask_source_key(0)?))
+                    .is_none()
                     || node.style.rare().mask_image_set_source.is_some())
                 && !node.style.rare().mask_image_url.is_empty()
             {
@@ -1932,13 +2185,21 @@ impl EngineFrame {
                     crate::html::resolve_url(&selected, base_url),
                 ));
             }
-            for (layer_index, layer) in node.style.rare().additional_mask_images.iter().enumerate() {
+            for (layer_index, layer) in node.style.rare().additional_mask_images.iter().enumerate()
+            {
                 if !can_paint_resource || layer.url.is_empty() {
                     continue;
                 }
-                let loaded = node.mask_images.as_ref().and_then(|images| {
-                    images.get_for_source(layer_index + 1, node.style.mask_source_key(layer_index + 1)?)
-                }).is_some();
+                let loaded = node
+                    .mask_images
+                    .as_ref()
+                    .and_then(|images| {
+                        images.get_for_source(
+                            layer_index + 1,
+                            node.style.mask_source_key(layer_index + 1)?,
+                        )
+                    })
+                    .is_some();
                 if !loaded || layer.image_set_source.is_some() {
                     let selected = layer.url_for_dpr(device_pixel_ratio);
                     out.push((
@@ -2011,6 +2272,9 @@ impl EngineFrame {
 
         for mutation in &mutations {
             match mutation {
+                DomMutation::SetDocumentMode { doctype } => {
+                    self.doc.apply_streamed_doctype(doctype.as_ref());
+                }
                 DomMutation::InsertElement {
                     parent_path,
                     path,
@@ -2029,7 +2293,11 @@ impl EngineFrame {
                         if let Some(node) = self.doc.find_webcore_mut(child_id) {
                             crate::html::parser::HtmlParser::post_process_node(node, &base_url);
                         }
-                        if tag == "img" || tag == "video" {
+                        let image_element = self
+                            .doc
+                            .get_node(child_id)
+                            .is_some_and(|node| node.is_image_element());
+                        if image_element || tag == "video" {
                             let mut element_path = parent_path.clone();
                             if let Some(child_index) = self
                                 .doc
@@ -2037,7 +2305,7 @@ impl EngineFrame {
                                 .and_then(|n| n.children.len().checked_sub(1))
                             {
                                 element_path.push(child_index);
-                                if tag == "img" {
+                                if image_element {
                                     self.resolve_streamed_image_source(&element_path);
                                     self.apply_streamed_image_dimension_hints(&element_path);
                                 }
@@ -2108,6 +2376,9 @@ impl EngineFrame {
         if let Some(mut parser) = self.streaming_parser.take() {
             for mutation in parser.finish() {
                 match mutation {
+                    crate::html::streaming::DomMutation::SetDocumentMode { doctype } => {
+                        self.doc.apply_streamed_doctype(doctype.as_ref());
+                    }
                     crate::html::streaming::DomMutation::InsertElement {
                         parent_path,
                         path,
@@ -2132,11 +2403,13 @@ impl EngineFrame {
                                 child_index.and_then(|len| len.checked_sub(1))
                             {
                                 element_path.push(child_index);
-                                if tag == "img" || tag == "video" {
-                                    if tag == "img" {
-                                        self.resolve_streamed_image_source(&element_path);
-                                        self.apply_streamed_image_dimension_hints(&element_path);
-                                    }
+                                if self
+                                    .doc
+                                    .get_node(child_id)
+                                    .is_some_and(|node| node.is_image_element())
+                                {
+                                    self.resolve_streamed_image_source(&element_path);
+                                    self.apply_streamed_image_dimension_hints(&element_path);
                                 }
                             }
                         }
@@ -2314,9 +2587,129 @@ mod tests {
     use super::*;
 
     #[test]
+    fn webm_presentation_backpressure_retains_frames_for_video_worker_retry() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        tx.send(PendingVideoUpdate::Frames {
+            node_id: 1,
+            frames: vec![],
+        })
+        .ok()
+        .unwrap();
+        assert!(matches!(
+            try_send_webm_update(
+                &tx,
+                PendingVideoUpdate::WebmFrames {
+                    node_id: 2,
+                    generation: 0,
+                    frames: vec![],
+                },
+                0,
+            ),
+            Err(std::sync::mpsc::TrySendError::Full(
+                PendingVideoUpdate::WebmFrames {
+                    node_id: 2,
+                    generation: 0,
+                    ..
+                }
+            ))
+        ));
+        let metadata = PendingVideoUpdate::Metadata {
+            node_id: 2,
+            metadata: crate::video::backend::MediaMetadata {
+                presentation_size: None,
+                duration: Some(1.0),
+                width: None,
+                height: None,
+                sample_rate: Some(48_000),
+                channels: Some(2),
+            },
+        };
+        assert!(matches!(
+            try_send_webm_update(&tx, metadata, 0),
+            Err(std::sync::mpsc::TrySendError::Full(
+                PendingVideoUpdate::Metadata { .. }
+            ))
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(PendingVideoUpdate::Frames { node_id: 1, .. })
+        ));
+        assert!(matches!(
+            try_send_webm_update(
+                &tx,
+                PendingVideoUpdate::WebmFrames {
+                    node_id: 2,
+                    generation: 0,
+                    frames: vec![],
+                },
+                0,
+            ),
+            Ok(true)
+        ));
+        drop(rx);
+        assert!(matches!(
+            try_send_webm_update(
+                &tx,
+                PendingVideoUpdate::WebmFrames {
+                    node_id: 2,
+                    generation: 0,
+                    frames: vec![],
+                },
+                0,
+            ),
+            Err(std::sync::mpsc::TrySendError::Disconnected(_))
+        ));
+    }
+
+    #[test]
+    fn stale_webm_presentation_does_not_wait_on_a_full_channel_after_seek() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        tx.send(PendingVideoUpdate::Frames {
+            node_id: 1,
+            frames: vec![],
+        })
+        .ok()
+        .unwrap();
+        assert!(matches!(
+            try_send_webm_update(
+                &tx,
+                PendingVideoUpdate::WebmFrames {
+                    node_id: 2,
+                    generation: 0,
+                    frames: vec![],
+                },
+                1
+            ),
+            Ok(false)
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(PendingVideoUpdate::Frames { node_id: 1, .. })
+        ));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            try_send_webm_update(
+                &tx,
+                PendingVideoUpdate::WebmFrames {
+                    node_id: 2,
+                    generation: 1,
+                    frames: vec![],
+                },
+                1
+            ),
+            Ok(true)
+        ));
+    }
+
+    #[test]
     fn typed_vp9_source_paints_a_first_frame() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"),
-            "/../webmedia/tests/fixtures/vp9-lossless.webm");
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../webmedia/tests/fixtures/vp9-lossless.webm"
+        );
         let mut frame = EngineFrame::empty(640.0, 480.0);
         frame.load_html(&format!(
             "<video id=movie autoplay muted><source src='{path}' type='video/webm; codecs=\"vp9\"'></video>"));
@@ -2330,16 +2723,23 @@ mod tests {
                 assert!(frame.doc.media_duration(id).unwrap() > 0.0);
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "typed VP9 source did not paint");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "typed VP9 source did not paint"
+            );
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
     }
 
     #[test]
     fn local_webm_vp8_video_paints_a_frame() {
-        let Ok(path) = std::env::var("WEBCORE_WEBM_FIXTURE") else { return };
+        let Ok(path) = std::env::var("WEBCORE_WEBM_FIXTURE") else {
+            return;
+        };
         let mut frame = EngineFrame::empty(640.0, 480.0);
-        frame.load_html(&format!("<video id=movie autoplay muted src='{path}'></video>"));
+        frame.load_html(&format!(
+            "<video id=movie autoplay muted src='{path}'></video>"
+        ));
         let id = frame.doc.get_element_by_id("movie").unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
@@ -2351,7 +2751,10 @@ mod tests {
                 assert!(frame.doc.media_duration(id).unwrap() > 0.0);
                 break;
             }
-            assert!(std::time::Instant::now() < deadline, "VP8 frame did not paint");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "VP8 frame did not paint"
+            );
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
     }
@@ -2505,6 +2908,37 @@ mod tests {
     }
 
     #[test]
+    fn streaming_frame_preserves_document_mode_and_author_control_styles() {
+        for (prefix, mode) in [
+            (
+                "<!doctype html>",
+                crate::html::doctype::QuirksMode::NoQuirks,
+            ),
+            ("", crate::html::doctype::QuirksMode::Quirks),
+        ] {
+            let mut frame = EngineFrame::empty(320.0, 240.0);
+            frame.start_streaming("https://example.test/");
+            frame.feed_html_chunk(prefix.as_bytes());
+            frame.feed_html_chunk(
+                b"<style>input {width:73px;box-sizing:content-box}</style><input id=field>",
+            );
+            frame.finish_loading();
+            frame.update_frame();
+            assert_eq!(frame.doc.quirks, mode);
+            assert_eq!(frame.doc.doctype != 0, !prefix.is_empty());
+            fn field(node: &crate::WebCore) -> Option<&crate::WebCore> {
+                if node.attributes.get("id").is_some_and(|id| id == "field") {
+                    return Some(node);
+                }
+                node.children.iter().find_map(field)
+            }
+            let input = field(&frame.doc.root).unwrap();
+            assert_eq!(input.style.box_sizing, crate::types::BoxSizing::ContentBox);
+            assert!((input.layout.content_rect.w - 73.0).abs() < 0.01);
+        }
+    }
+
+    #[test]
     fn streaming_frame_keeps_parser_state_across_chunks() {
         let mut frame = EngineFrame::empty(320.0, 240.0);
         frame.start_streaming("https://example.test/");
@@ -2540,6 +2974,52 @@ mod tests {
         assert_eq!(frame.scheduled_videos.len(), 1);
         assert!(frame.video_rx.is_some());
         assert_eq!(frame.doc.layout_generation, 0);
+    }
+
+    #[test]
+    fn history_media_restore_reschedules_without_layout() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.start_streaming("/private/tmp/");
+        frame.feed_html_chunk(
+            b"<html><body><video autoplay src='/private/tmp/missing-history-stream.webm'>",
+        );
+        frame.stop_media_playback();
+        let layout_generation = frame.doc.layout_generation;
+
+        frame.resume_media_playback();
+
+        assert_eq!(frame.scheduled_videos.len(), 1);
+        assert_eq!(frame.webm_playback.len(), 1);
+        assert!(frame.video_rx.is_some());
+        assert_eq!(frame.doc.layout_generation, layout_generation);
+        frame.stop_media_playback();
+    }
+
+    #[test]
+    fn history_media_teardown_cancels_workers_without_changing_document_state() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        let (playback, pcm) = crate::video::playback::Playback::new(12.0);
+        let control = playback.control.clone();
+        let key = (42, "history.webm".to_string());
+        frame.scheduled_videos.insert(key.clone());
+        frame.webm_playback.insert(key, playback);
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        frame.video_tx = Some(tx);
+        frame.video_rx = Some(rx);
+        let mut state = crate::video::MediaElementState::default();
+        state.current_time = 12.0;
+        state.paused = false;
+        frame.doc.media_states.insert(42, state);
+
+        frame.stop_media_playback();
+
+        assert!(control.cancelled());
+        assert!(frame.webm_playback.is_empty());
+        assert!(frame.scheduled_videos.is_empty());
+        assert!(frame.video_tx.is_none() && frame.video_rx.is_none());
+        assert_eq!(frame.doc.media_states[&42].current_time, 12.0);
+        assert!(!frame.doc.media_states[&42].paused);
+        drop(pcm);
     }
 
     #[test]
@@ -2994,6 +3474,30 @@ mod tests {
     }
 
     #[test]
+    fn streaming_image_submitter_reserves_dimensions_before_decode() {
+        let mut frame = EngineFrame::empty(320.0, 240.0);
+        frame.start_streaming("https://example.test/");
+        frame.feed_html_chunk(br#"<!doctype html><form><input id=send type=IMAGE width=80 height=24 src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='2' height='1'%3E%3Crect width='2' height='1' fill='red'/%3E%3C/svg%3E">"#);
+        let id = frame.doc.get_element_by_id("send").unwrap();
+        let node = frame.doc.find_webcore(id).unwrap();
+        assert_eq!((node.image_width, node.image_height), (80, 24));
+        assert!(node.resolved_src.starts_with("data:image/svg+xml,"));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            frame.update_frame();
+            let node = frame.doc.find_webcore(id).unwrap();
+            if node.svg_document.is_some() || node.image_data.is_some() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "image submitter never received its decoded resource"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    #[test]
     fn streamed_css_background_images_are_scheduled_after_cascade() {
         let mut frame = EngineFrame::empty(320.0, 240.0);
         frame.start_streaming("https://example.test/");
@@ -3293,20 +3797,43 @@ mod tests {
         }
         {
             let loaded = find_after_mut(&mut frame.doc.root).expect("generated ::after");
-            std::sync::Arc::make_mut(loaded.mask_images.get_or_insert_with(Default::default)).set(0, crate::types::DecodedMaskImage {
-                data: std::sync::Arc::new(vec![255; 16]),
-                width: 2,
-                height: 2,
-                resolution: 1.0,
-            });
+            std::sync::Arc::make_mut(loaded.mask_images.get_or_insert_with(Default::default)).set(
+                0,
+                crate::types::DecodedMaskImage {
+                    data: std::sync::Arc::new(vec![255; 16]),
+                    width: 2,
+                    height: 2,
+                    resolution: 1.0,
+                },
+            );
         }
         let loaded = find_after(&frame.doc.root).expect("generated ::after");
         assert!(
             loaded.mask_images.as_ref().unwrap().first.is_some(),
             "test setup should attach pseudo mask pixels"
         );
-        assert_eq!(loaded.mask_images.as_ref().unwrap().first.as_ref().unwrap().width, 2);
-        assert_eq!(loaded.mask_images.as_ref().unwrap().first.as_ref().unwrap().height, 2);
+        assert_eq!(
+            loaded
+                .mask_images
+                .as_ref()
+                .unwrap()
+                .first
+                .as_ref()
+                .unwrap()
+                .width,
+            2
+        );
+        assert_eq!(
+            loaded
+                .mask_images
+                .as_ref()
+                .unwrap()
+                .first
+                .as_ref()
+                .unwrap()
+                .height,
+            2
+        );
 
         frame.mark_style_dirty();
         assert!(frame.update_frame(), "forced recascade should run");
@@ -3315,8 +3842,28 @@ mod tests {
             recascaded.mask_images.as_ref().unwrap().first.is_some(),
             "pseudo rebuild must preserve loaded mask pixels"
         );
-        assert_eq!(recascaded.mask_images.as_ref().unwrap().first.as_ref().unwrap().width, 2);
-        assert_eq!(recascaded.mask_images.as_ref().unwrap().first.as_ref().unwrap().height, 2);
+        assert_eq!(
+            recascaded
+                .mask_images
+                .as_ref()
+                .unwrap()
+                .first
+                .as_ref()
+                .unwrap()
+                .width,
+            2
+        );
+        assert_eq!(
+            recascaded
+                .mask_images
+                .as_ref()
+                .unwrap()
+                .first
+                .as_ref()
+                .unwrap()
+                .height,
+            2
+        );
     }
 
     #[test]
@@ -3633,6 +4180,11 @@ mod tests {
             !update.rebuild_display_list,
             "far-offscreen image completion should wait for a later scroll-band rebuild"
         );
+        assert_eq!(
+            update.resource_paint_rects.len(),
+            1,
+            "offscreen pixels still invalidate retained resources"
+        );
     }
 
     #[test]
@@ -3646,6 +4198,7 @@ mod tests {
         frame.doc.media_apply_video_metadata(
             id,
             crate::video::backend::MediaMetadata {
+                presentation_size: None,
                 duration: Some(1.0),
                 width: Some(2),
                 height: Some(2),
@@ -3659,6 +4212,7 @@ mod tests {
         tx.send(PendingVideoUpdate::Frames {
             node_id: id,
             frames: vec![crate::video::backend::VideoFrame {
+                presentation_size: None,
                 width: 2,
                 height: 2,
                 rgba: std::sync::Arc::new(vec![0, 0, 0, 255].repeat(4)),
@@ -3676,6 +4230,7 @@ mod tests {
         tx.send(PendingVideoUpdate::Frames {
             node_id: id,
             frames: vec![crate::video::backend::VideoFrame {
+                presentation_size: None,
                 width: 2,
                 height: 2,
                 rgba: std::sync::Arc::new(vec![255, 255, 255, 255].repeat(4)),
@@ -3705,19 +4260,25 @@ mod tests {
     #[test]
     fn paused_video_queue_does_not_block_playing_video_updates() {
         let mut frame = EngineFrame::new(
-            crate::html::parse_html("<video id=hero src=clip.mp4></video><video id=paused></video>"),
+            crate::html::parse_html(
+                "<video id=hero src=clip.mp4></video><video id=paused></video>",
+            ),
             320.0,
             240.0,
         );
         let hero = frame.doc.get_element_by_id("hero").unwrap();
         let paused = frame.doc.get_element_by_id("paused").unwrap();
         for timestamp in 0..8 {
-            assert!(frame.doc.media_queue_video_frames(paused, vec![crate::video::backend::VideoFrame {
-                width: 1,
-                height: 1,
-                rgba: std::sync::Arc::new(vec![0, 0, 0, 255]),
-                timestamp: timestamp as f32,
-            }]));
+            assert!(frame.doc.media_queue_video_frames(
+                paused,
+                vec![crate::video::backend::VideoFrame {
+                    presentation_size: None,
+                    width: 1,
+                    height: 1,
+                    rgba: std::sync::Arc::new(vec![0, 0, 0, 255]),
+                    timestamp: timestamp as f32,
+                }]
+            ));
         }
         assert!(frame.doc.media_play(hero));
         let (tx, rx) = std::sync::mpsc::sync_channel(8);
@@ -3725,15 +4286,29 @@ mod tests {
         tx.send(PendingVideoUpdate::Frames {
             node_id: hero,
             frames: vec![crate::video::backend::VideoFrame {
+                presentation_size: None,
                 width: 1,
                 height: 1,
                 rgba: std::sync::Arc::new(vec![255, 0, 0, 255]),
                 timestamp: 0.0,
             }],
-        }).unwrap();
+        })
+        .unwrap();
         frame.update_frame();
-        assert_eq!(frame.doc.media_states[&paused].pending_video_frames.len(), 8);
-        assert_eq!(frame.doc.find_webcore(hero).unwrap().image_data.as_ref().unwrap()[0], 255);
+        assert_eq!(
+            frame.doc.media_states[&paused].pending_video_frames.len(),
+            8
+        );
+        assert_eq!(
+            frame
+                .doc
+                .find_webcore(hero)
+                .unwrap()
+                .image_data
+                .as_ref()
+                .unwrap()[0],
+            255
+        );
     }
 
     #[test]
@@ -3766,9 +4341,15 @@ mod tests {
 
         frame.doc.needs_animation_frame = true;
         let update = frame.update_frame_detailed();
-        assert!(!update.changed, "an unchanged paused override is not paint damage");
+        assert!(
+            !update.changed,
+            "an unchanged paused override is not paint damage"
+        );
         assert!(!update.rebuild_display_list);
-        assert!(!frame.has_animations(), "paused CSS must not keep the frame clock awake");
+        assert!(
+            !frame.has_animations(),
+            "paused CSS must not keep the frame clock awake"
+        );
     }
 
     #[test]
@@ -3851,12 +4432,18 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
 
         let update = frame.update_frame_detailed();
-        assert!(!update.changed, "offscreen SVG samples are not visible damage");
+        assert!(
+            !update.changed,
+            "offscreen SVG samples are not visible damage"
+        );
         assert!(
             !frame.has_animations(),
             "an offscreen-only SVG must not keep the frame clock awake"
         );
-        assert!(!frame.needs_render(), "offscreen SVG has no pending frame work");
+        assert!(
+            !frame.needs_render(),
+            "offscreen SVG has no pending frame work"
+        );
 
         let svg_id = frame.doc.query_selector("svg").unwrap();
         frame
@@ -3867,16 +4454,27 @@ mod tests {
             Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
         frame.scroll_to(0.0, 3000.0);
         assert!(frame.update_frame());
-        let fill = &frame.doc.find_webcore(svg_id).unwrap().svg_animation_overrides[0].2;
+        let fill = &frame
+            .doc
+            .find_webcore(svg_id)
+            .unwrap()
+            .svg_animation_overrides[0]
+            .2;
         let red = fill
             .strip_prefix("rgba(")
             .and_then(|value| value.split(',').next())
             .and_then(|value| value.parse::<u8>().ok())
             .expect("sampled SVG fill color");
-        assert!((110..=145).contains(&red), "SVG should resume near its midpoint: {fill}");
+        assert!(
+            (110..=145).contains(&red),
+            "SVG should resume near its midpoint: {fill}"
+        );
         std::thread::sleep(std::time::Duration::from_millis(20));
         let update = frame.update_frame_detailed();
-        assert!(update.changed, "the SVG must repaint after entering the viewport");
+        assert!(
+            update.changed,
+            "the SVG must repaint after entering the viewport"
+        );
         assert!(!update.paint_rects.is_empty());
     }
 
@@ -3925,14 +4523,19 @@ mod tests {
 
         frame.doc.get_box_by_id_mut(id).unwrap().layout.border_rect =
             Rect::new(0.0, 0.0, 80.0, 60.0);
-        frame.doc.media_states.get_mut(&id).unwrap().pending_video_frames.push_back(
-            crate::video::backend::VideoFrame {
+        frame
+            .doc
+            .media_states
+            .get_mut(&id)
+            .unwrap()
+            .pending_video_frames
+            .push_back(crate::video::backend::VideoFrame {
+                presentation_size: None,
                 width: 1,
                 height: 1,
                 rgba: std::sync::Arc::new(vec![255, 0, 0, 255]),
                 timestamp: 0.0,
-            },
-        );
+            });
         assert!(!frame.media_only_idle());
     }
 

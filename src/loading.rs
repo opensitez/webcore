@@ -206,7 +206,15 @@ static BYTE_FETCH_IN_FLIGHT: std::sync::LazyLock<
     Mutex<std::collections::HashMap<String, Arc<ByteFetchState>>>,
 > = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
-pub const DEFAULT_NEW_TAB_HTML: &str = "<!doctype html><title>New Tab</title><body></body>";
+pub const DEFAULT_NEW_TAB_HTML: &str = include_str!("browser/new_tab.html");
+
+fn about_document_html(url: &str) -> &'static str {
+    if url == "about:newtab" {
+        DEFAULT_NEW_TAB_HTML
+    } else {
+        "<!doctype html><title></title><body></body>"
+    }
+}
 
 fn should_emit_early_preview(html: &str, sent_preview: bool) -> bool {
     if sent_preview || html.len() < 256 {
@@ -441,7 +449,7 @@ impl PageSession {
                 let mut frame = crate::EngineFrame::empty(viewport_w, viewport_h);
                 frame.set_cache_dir(options.cache_dir.clone());
                 frame.start_streaming(&url);
-                frame.feed_html_chunk(DEFAULT_NEW_TAB_HTML.as_bytes());
+                frame.feed_html_chunk(about_document_html(&url).as_bytes());
                 frame.finish_loading();
                 frame.update_frame();
                 on_event(PageSessionEvent::Page {
@@ -580,7 +588,7 @@ where
     F: FnMut(String, String),
 {
     if url.starts_with("about:") {
-        let html = "<!doctype html><title>New Tab</title><body></body>".to_string();
+        let html = about_document_html(url).to_string();
         on_chunk(url.to_string(), html.clone());
         return Ok((html, url.to_string()));
     }
@@ -592,9 +600,10 @@ where
         on_chunk(url.to_string(), html.clone());
         return Ok((html, url.to_string()));
     }
-    if let Some(path) = url.strip_prefix("file://") {
-        let file =
-            std::fs::File::open(path).map_err(|e| format!("failed to read file {path}: {e}"))?;
+    if url.starts_with("file:") {
+        let path = local_resource_path(url)?;
+        let file = std::fs::File::open(&path)
+            .map_err(|e| format!("failed to read file {}: {e}", path.display()))?;
         return stream_document_reader(file, url.to_string(), options, on_chunk);
     }
     if options.request_body.is_none()
@@ -632,8 +641,7 @@ where
             break;
         }
         bytes_read = bytes_read.saturating_add(n);
-        if bytes_read > MAX_DOCUMENT_BYTES || is_binary_document_chunk(&buf[..n], bytes_read == n)
-        {
+        if bytes_read > MAX_DOCUMENT_BYTES || is_binary_document_chunk(&buf[..n], bytes_read == n) {
             return Err("refusing binary or oversized document input".to_string());
         }
         let text = decode_streaming_text(&mut decoder, &buf[..n], false);
@@ -877,12 +885,7 @@ fn media_document(url: &str, kind: MediaKind) -> String {
     };
     let name = reqwest::Url::parse(url)
         .ok()
-        .and_then(|parsed| {
-            parsed
-                .path_segments()?
-                .next_back()
-                .map(str::to_string)
-        })
+        .and_then(|parsed| parsed.path_segments()?.next_back().map(str::to_string))
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| "Media".to_string());
     let src = escape_html(url).replace('"', "&quot;");
@@ -1304,11 +1307,22 @@ pub(crate) fn cache_fetched_bytes(url: &str, cache_dir: &str, data: Vec<u8>) {
     enqueue_cache_bytes(path, data.clone());
 }
 
+fn local_resource_path(url: &str) -> Result<std::path::PathBuf, String> {
+    if url.starts_with("file:") {
+        reqwest::Url::parse(url)
+            .map_err(|error| format!("invalid file URL: {error}"))?
+            .to_file_path()
+            .map_err(|_| format!("file URL cannot be converted to a local path: {url}"))
+    } else {
+        Ok(std::path::PathBuf::from(url))
+    }
+}
+
 pub fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
     let started = crate::profile::is_enabled().then(std::time::Instant::now);
     let profile_epoch = crate::profile::epoch();
     if !url.starts_with("http://") && !url.starts_with("https://") {
-        let path = url.strip_prefix("file://").unwrap_or(url);
+        let path = local_resource_path(url)?;
         let result = std::fs::read(path).map_err(|e| e.to_string());
         if let Some(started) = started {
             crate::profile::record_resource_for(
@@ -1366,7 +1380,7 @@ where
     F: FnMut(&[u8], Option<&'static encoding_rs::Encoding>),
 {
     if !url.starts_with("http://") && !url.starts_with("https://") {
-        let path = url.strip_prefix("file://").unwrap_or(url);
+        let path = local_resource_path(url)?;
         let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
         let mut buf = [0u8; 16 * 1024];
         loop {
@@ -1626,7 +1640,69 @@ fn read_css_cache_header(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn file_url_resource_paths_decode_names_but_exclude_query_and_fragment() {
+        let path = std::env::temp_dir().join("webcore a#b.html");
+        let mut url = reqwest::Url::from_file_path(&path).unwrap();
+        url.set_query(Some("q=ready"));
+        url.set_fragment(Some("section"));
+        assert_eq!(super::local_resource_path(url.as_str()).unwrap(), path);
+        assert!(super::local_resource_path("file://remote.example:8080/file.html").is_err());
+    }
+
+    #[test]
+    fn file_url_loaders_preserve_navigation_query_without_reading_it_as_a_path() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/html/implicit_submission.html");
+        let mut url = reqwest::Url::from_file_path(path).unwrap();
+        url.set_query(Some("go=external&q=ready"));
+        url.set_fragment(Some("form"));
+        let url = url.as_str();
+        let mut delivered = String::new();
+        let (html, final_url) = super::load_document_streaming_chunks(
+            url,
+            &super::PageLoadOptions::default(),
+            |chunk_url, chunk| {
+                assert_eq!(chunk_url, url);
+                delivered.push_str(&chunk);
+            },
+        )
+        .unwrap();
+        assert_eq!(final_url, url);
+        assert!(html.contains("Implicit Submission Audit"));
+        assert_eq!(delivered, html);
+        let bytes = super::fetch_bytes(url).unwrap();
+        let mut text_bytes = Vec::new();
+        super::fetch_text_resource_uncached_streaming(url, |chunk, _| {
+            text_bytes.extend_from_slice(chunk);
+        })
+        .unwrap();
+        assert_eq!(bytes, text_bytes);
+        assert!(
+            String::from_utf8(bytes)
+                .unwrap()
+                .contains("Implicit Submission Audit")
+        );
+    }
+
     use super::*;
+
+    #[test]
+    fn new_tab_document_is_not_the_blank_document() {
+        assert!(about_document_html("about:newtab").contains("<h1>Webcore</h1>"));
+        assert!(about_document_html("about:newtab").contains("name=\"q\""));
+        assert!(!about_document_html("about:blank").contains("<h1>"));
+        let mut streamed = String::new();
+        let (html, url) = load_document_streaming_chunks(
+            "about:newtab",
+            &PageLoadOptions::default(),
+            |_, chunk| streamed.push_str(&chunk),
+        )
+        .unwrap();
+        assert_eq!(streamed, DEFAULT_NEW_TAB_HTML);
+        assert_eq!(html, DEFAULT_NEW_TAB_HTML);
+        assert_eq!(url, "about:newtab");
+    }
 
     #[test]
     fn document_reader_rejects_binary_even_when_caller_expects_html() {
@@ -1668,12 +1744,11 @@ mod tests {
     fn direct_media_url_opens_paused_player_without_reading_binary() {
         let url = "file:///nonexistent/clip.mp4?name=%22sample%22";
         let mut chunks = Vec::new();
-        let (html, final_url) = load_document_streaming_chunks(
-            url,
-            &PageLoadOptions::default(),
-            |chunk_url, chunk| chunks.push((chunk_url, chunk)),
-        )
-        .unwrap();
+        let (html, final_url) =
+            load_document_streaming_chunks(url, &PageLoadOptions::default(), |chunk_url, chunk| {
+                chunks.push((chunk_url, chunk))
+            })
+            .unwrap();
         assert_eq!(final_url, url);
         assert_eq!(chunks, [(url.to_string(), html.clone())]);
         assert!(html.contains("<video controls preload=\"metadata\""));

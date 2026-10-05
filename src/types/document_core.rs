@@ -9,6 +9,19 @@ use crate::html::*;
 use crate::layout::LayoutEngine;
 use std::collections::{HashMap, HashSet};
 
+fn element_image_result_is_current(
+    node: &WebCore,
+    url: &str,
+    base_url: &str,
+    fallback: bool,
+) -> bool {
+    if !fallback && !node.resolved_src.is_empty() {
+        return node.resolved_src == url;
+    }
+    crate::html::image_fallback_source(node)
+        .is_none_or(|source| crate::html::resolve_url(source, base_url) == url)
+}
+
 fn union_rect(a: Rect, b: Rect) -> Rect {
     if a.w <= 0.0 || a.h <= 0.0 {
         return b;
@@ -114,6 +127,7 @@ impl Document {
             layout_store: crate::layout::layout_box::LayoutStore::new(),
             pending_nodes: HashMap::new(),
             base_url: String::new(),
+            navigation_url: None,
             linked_stylesheets: Vec::new(),
             document_stylesheets: Vec::new(),
             inline_stylesheet_cache: HashMap::new(),
@@ -135,6 +149,9 @@ impl Document {
             active_box: 0,
             focused_box: 0,
             mousedown_target: 0,
+            pointer_activation_target: None,
+            keyboard_activation_target: None,
+            keyboard_space_target: 0,
             last_click_target: 0,
             last_click_time: None,
             drag_source: 0,
@@ -148,6 +165,9 @@ impl Document {
             traversals: crate::dom::traversal::TraversalStore::new(),
             ranges: crate::dom::range::RangeStore::new(),
             top_layer: Vec::new(),
+            dialog_states: HashMap::new(),
+            listbox_anchors: HashMap::new(),
+            listbox_active_options: HashMap::new(),
             suppress_range_updates: false,
             viewport_w: 0.0,
             viewport_h: 0.0,
@@ -156,7 +176,10 @@ impl Document {
             caret_blink_epoch: std::time::Instant::now(),
             open_select: 0,
             open_picker: 0,
+            picker_calendar: None,
+            picker_time: None,
             dropdown_hover_idx: -1,
+            dropdown_scroll: 0.0,
             // Transient interaction state, like the two popups beside it: a
             // fresh document is holding nothing.
             dragging_range: 0,
@@ -517,7 +540,7 @@ impl Document {
             return None;
         }
 
-        let mut active_rules = crate::css::ua_sheet::ua_rule_count();
+        let mut active_rules = crate::css::ua_sheet::ua_rule_count(self.quirks);
         let mut later_rules = 0usize;
         for (slot, entry) in self.document_stylesheets.iter().enumerate() {
             let sheet = match entry {
@@ -557,8 +580,26 @@ impl Document {
             .then_some(self.stylesheet.rules.len() - later_rules)
     }
 
+    pub(crate) fn apply_streamed_doctype(
+        &mut self,
+        doctype: Option<&crate::html::doctype::Doctype>,
+    ) {
+        let mode = crate::html::doctype::quirks_mode(doctype);
+        self.doctype = doctype.map_or(0, |doctype| {
+            self.arena
+                .create_doctype(&doctype.name, &doctype.public_id, &doctype.system_id)
+                .0
+        });
+        if self.quirks != mode {
+            self.quirks = mode;
+            self.rebuild_author_stylesheet_from_document_order();
+            self.style_dirty = true;
+            self.root.layout.layout_dirty = true;
+        }
+    }
+
     fn rebuild_author_stylesheet_from_document_order(&mut self) {
-        self.stylesheet = crate::css::ua_stylesheet();
+        self.stylesheet = crate::css::ua_sheet::ua_stylesheet_for_mode(self.quirks);
         for (idx, ds) in self.document_stylesheets.iter().enumerate() {
             match ds {
                 DocumentStylesheet::Inline { css, media } => {
@@ -759,23 +800,49 @@ impl Document {
         let start = std::time::Instant::now();
         let time_limited = !max_time.is_zero();
         let mut processed = 0usize;
-        let mut queue_drained = false;
+        let mut finished = false;
         loop {
-            let Ok(result) = rx.try_recv() else {
-                queue_drained = true;
-                break;
+            let result = match rx.try_recv() {
+                Ok(result) => result,
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    if self
+                        .images_in_flight
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                        != 0
+                    {
+                        break;
+                    }
+                    // Workers send before decrementing the count. Recheck after
+                    // observing zero so a final send racing the first poll is drained.
+                    match rx.try_recv() {
+                        Ok(result) => result,
+                        Err(_) => {
+                            finished = true;
+                            break;
+                        }
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    finished = true;
+                    break;
+                }
             };
             let (node_id, path, target, url, decoded) = match result {
                 PendingImageResult::Dimensions {
                     node_id,
                     path,
                     target,
+                    url,
                     width,
                     height,
                 } => {
                     if target == PendingImageTarget::Element {
                         let mut needs_relayout = false;
+                        let base_url = &self.base_url;
                         let mut update = |node: &mut WebCore| {
+                            if !element_image_result_is_current(node, &url, base_url, false) {
+                                return;
+                            }
                             if node.image_width != width || node.image_height != height {
                                 node.image_width = width;
                                 node.image_height = height;
@@ -845,8 +912,17 @@ impl Document {
                 });
                 match target {
                     PendingImageTarget::Element | PendingImageTarget::ElementFallback => {
+                        if !element_image_result_is_current(
+                            node,
+                            &url,
+                            &base_url,
+                            matches!(target, PendingImageTarget::ElementFallback),
+                        ) {
+                            return;
+                        }
                         if matches!(target, PendingImageTarget::ElementFallback)
-                            && node.image_data.is_some()
+                            && (node.image_data.is_some() || node.svg_document.is_some())
+                            && !node.image_is_fallback
                         {
                             return;
                         }
@@ -854,6 +930,8 @@ impl Document {
                         let intrinsic_size_controls_layout =
                             node.style.width.is_auto() || node.style.height.is_auto();
                         crate::html::set_decoded_image_on_node(node, decoded.clone());
+                        node.image_is_fallback =
+                            matches!(target, PendingImageTarget::ElementFallback);
                         target_needs_relayout |= intrinsic_size_controls_layout
                             && old_size != (node.image_width, node.image_height);
                         loaded_target = true;
@@ -1018,12 +1096,7 @@ impl Document {
                 break;
             }
         }
-        if !queue_drained
-            || self
-                .images_in_flight
-                .load(std::sync::atomic::Ordering::SeqCst)
-                != 0
-        {
+        if !finished {
             self.pending_images = Some(rx);
         }
         poll
@@ -2696,6 +2769,7 @@ mod tests {
             node_id: 12,
             path: vec![1],
             target: PendingImageTarget::Element,
+            url: "memory:image".into(),
             width: 20,
             height: 10,
         })
@@ -2784,5 +2858,132 @@ mod tests {
                 .loaded_any
         );
         assert_eq!(doc.root.children[0].bg_image_data.as_ref().unwrap()[0], 90);
+    }
+
+    #[test]
+    fn streamed_image_queue_survives_empty_poll_until_workers_finish() {
+        let mut doc = Document::new();
+        let mut image = WebCore::new("img");
+        image.node_id = 12;
+        image.resolved_src = "https://example.test/image.png".into();
+        doc.root.children.push(image);
+        let (tx, rx) = std::sync::mpsc::channel();
+        doc.pending_images = Some(rx);
+        doc.images_in_flight
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+
+        assert!(!doc.poll_pending_images_detailed().loaded_any);
+        assert!(
+            doc.pending_images.is_some(),
+            "a live producer can still publish"
+        );
+        tx.send(PendingImageResult::Loaded {
+            node_id: 12,
+            path: vec![0],
+            target: PendingImageTarget::Element,
+            url: "https://example.test/image.png".into(),
+            decoded: crate::html::DecodedImage::Raster(
+                std::sync::Arc::new(vec![90, 0, 0, 255]),
+                1,
+                1,
+            ),
+        })
+        .unwrap();
+        doc.images_in_flight
+            .store(0, std::sync::atomic::Ordering::SeqCst);
+        drop(tx);
+        assert!(doc.poll_pending_images_detailed().loaded_any);
+        assert_eq!(doc.root.children[0].image_data.as_ref().unwrap()[0], 90);
+        assert!(
+            doc.pending_images.is_none(),
+            "a drained disconnected queue is released"
+        );
+    }
+
+    #[test]
+    fn streamed_image_previews_finish_and_reject_stale_sources() {
+        let mut doc = Document::new();
+        doc.base_url = "https://example.test/".into();
+        let mut image = WebCore::new("img");
+        image.node_id = 12;
+        image.resolved_src = "https://example.test/selected.png".into();
+        image.attributes.insert("src", "fallback.png");
+        image.layout.border_rect = Rect::new(10.0, 20.0, 50.0, 40.0);
+        doc.root.children.push(image);
+        let (tx, rx) = std::sync::mpsc::channel();
+        doc.pending_images = Some(rx);
+        let loaded = |target, url: &str, red| PendingImageResult::Loaded {
+            node_id: 12,
+            path: vec![0],
+            target,
+            url: url.into(),
+            decoded: crate::html::DecodedImage::Raster(
+                std::sync::Arc::new(vec![red, 0, 0, 255]),
+                1,
+                1,
+            ),
+        };
+        for red in [40, 90] {
+            tx.send(loaded(
+                PendingImageTarget::ElementFallback,
+                "https://example.test/fallback.png",
+                red,
+            ))
+            .unwrap();
+            assert!(
+                doc.poll_pending_images_budgeted(1, std::time::Duration::ZERO)
+                    .loaded_any
+            );
+            assert_eq!(doc.root.children[0].image_data.as_ref().unwrap()[0], red);
+        }
+        for red in [120, 150] {
+            tx.send(loaded(
+                PendingImageTarget::Element,
+                "https://example.test/selected.png",
+                red,
+            ))
+            .unwrap();
+            let poll = doc.poll_pending_images_budgeted(1, std::time::Duration::ZERO);
+            assert!(poll.loaded_any);
+            assert!(
+                !poll.paint_rects.is_empty(),
+                "each same-size update must repaint"
+            );
+            assert_eq!(doc.root.children[0].image_data.as_ref().unwrap()[0], red);
+        }
+        for (target, url) in [
+            (
+                PendingImageTarget::ElementFallback,
+                "https://example.test/fallback.png",
+            ),
+            (PendingImageTarget::Element, "https://example.test/old.png"),
+        ] {
+            tx.send(loaded(target, url, 200)).unwrap();
+            assert!(
+                !doc.poll_pending_images_budgeted(1, std::time::Duration::ZERO)
+                    .loaded_any
+            );
+            assert_eq!(doc.root.children[0].image_data.as_ref().unwrap()[0], 150);
+        }
+        tx.send(PendingImageResult::Dimensions {
+            node_id: 12,
+            path: vec![0],
+            target: PendingImageTarget::Element,
+            url: "https://example.test/old.png".into(),
+            width: 900,
+            height: 700,
+        })
+        .unwrap();
+        assert!(
+            !doc.poll_pending_images_budgeted(1, std::time::Duration::ZERO)
+                .loaded_any
+        );
+        assert_eq!(
+            (
+                doc.root.children[0].image_width,
+                doc.root.children[0].image_height
+            ),
+            (1, 1)
+        );
     }
 }
