@@ -5,7 +5,7 @@
 
 use super::{SvgAttribute, SvgDocument, SvgElementKind, SvgNode};
 use crate::css::parse_color;
-use crate::svg::path::{flatten_path_points, parse_path_data};
+use crate::svg::path::{measure_path, parse_path_data};
 use crate::types::WebCore;
 use crate::types::{EasingFn, apply_easing};
 use std::collections::HashMap;
@@ -688,6 +688,7 @@ pub(crate) fn sample_svg_animation_overrides_with_controls(
     let animation_paths = collect_animation_def_paths(&doc.root);
 
     let mut out = Vec::new();
+    let mut ordinary_values = HashMap::new();
     collect_animation_samples(
         &doc.root,
         &doc.root,
@@ -700,8 +701,26 @@ pub(crate) fn sample_svg_animation_overrides_with_controls(
         controls,
         still_running,
         &mut out,
-        &mut HashMap::new(),
+        &mut ordinary_values,
+        false,
     );
+    // Motion is supplemental even when its own animation stack uses replace.
+    let mut motion = Vec::new();
+    collect_animation_samples(
+        &doc.root, &doc.root, &mut Vec::new(), None, elapsed_s,
+        &id_paths, &animation_defs, &animation_paths, controls, still_running,
+        &mut motion, &mut HashMap::new(), true,
+    );
+    for (path, attr, value) in motion {
+        let base = ordinary_values.get(&(path.clone(), attr.clone()))
+            .map(String::as_str)
+            .or_else(|| node_at_path_ref(&doc.root, &path).and_then(|node| node.attr(&attr)));
+        let value = match base.filter(|base| !base.trim().is_empty()) {
+            Some(base) => format!("{base} {value}"),
+            None => value,
+        };
+        out.push((path, attr, value));
+    }
     out
 }
 
@@ -883,8 +902,11 @@ fn collect_animation_samples(
     still_running: &mut bool,
     out: &mut Vec<SvgAnimationOverride>,
     active_values: &mut HashMap<(Vec<usize>, String), String>,
+    motion_only: bool,
 ) {
-    if let Some(anim) = &node.animation {
+    if let Some(anim) = &node.animation
+        && (anim.kind == SvgAnimationKind::AnimateMotion) == motion_only
+    {
         let target_path = anim
             .href
             .as_deref()
@@ -899,7 +921,8 @@ fn collect_animation_samples(
                 .get(&(path.clone(), attr.clone()))
                 .cloned()
                 .or_else(|| {
-                    node_at_path_ref(root, path)
+                    (!motion_only).then(|| node_at_path_ref(root, path))
+                        .flatten()
                         .and_then(|target| animation_base_attr(target, anim))
                 })
         });
@@ -947,6 +970,7 @@ fn collect_animation_samples(
             still_running,
             out,
             active_values,
+            motion_only,
         );
         path.pop();
     }
@@ -1960,22 +1984,25 @@ fn apply_accumulate_value(anim: &SvgAnimationElement, sampled: &str, iteration: 
     if anim.accumulate != SvgAccumulateMode::Sum || iteration == 0 {
         return sampled.to_string();
     }
-    let Some(delta) = animation_delta(anim) else {
+    let Some(endpoint) = animation_accumulation_value(anim) else {
         return sampled.to_string();
     };
-    let Some(offset) = scale_numeric_value(&delta, iteration as f32) else {
+    let Some(offset) = scale_numeric_value(&endpoint, iteration as f32) else {
         return sampled.to_string();
     };
     add_numeric_values(sampled, &offset).unwrap_or_else(|| sampled.to_string())
 }
 
-fn animation_delta(anim: &SvgAnimationElement) -> Option<String> {
+fn animation_accumulation_value(anim: &SvgAnimationElement) -> Option<String> {
+    // SVG accumulate=sum adds the simple-duration endpoint, not end minus start.
     if !anim.values.values.is_empty() {
-        return subtract_numeric_values(anim.values.values.last()?, anim.values.values.first()?);
+        return anim.values.values.last().cloned();
     }
     match (&anim.values.from, &anim.values.to, &anim.values.by) {
-        (Some(from), Some(to), _) => subtract_numeric_values(to, from),
-        (Some(_), None, Some(by)) | (None, None, Some(by)) => Some(by.clone()),
+        (Some(_), Some(to), _) => Some(to.clone()),
+        (Some(from), None, Some(by)) => add_numeric_values(from, by),
+        (None, None, Some(by)) => Some(by.clone()),
+        // To-only animations do not accumulate; their underlying value can change.
         _ => None,
     }
 }
@@ -1985,7 +2012,7 @@ fn final_iteration(local_s: f32, dur_s: f32, active_s: f32) -> u32 {
 }
 
 fn current_iteration(local_s: f32, dur_s: f32, active_s: f32) -> u32 {
-    if dur_s <= 0.0 || !active_s.is_finite() {
+    if dur_s <= 0.0 {
         return 0;
     }
     if (local_s - active_s).abs() < 0.0001 && active_s > 0.0 {
@@ -2006,24 +2033,6 @@ fn add_numeric_values(a: &str, b: &str) -> Option<String> {
             .map(|(x, y)| {
                 matching_numeric_suffix(&x.1, &y.1)
                     .map(|suffix| format_dimension(x.0 + y.0, suffix))
-            })
-            .collect::<Option<Vec<_>>>()?
-            .join(" "),
-    )
-}
-
-fn subtract_numeric_values(a: &str, b: &str) -> Option<String> {
-    let a = parse_numeric_components(a)?;
-    let b = parse_numeric_components(b)?;
-    if a.len() != b.len() || a.is_empty() {
-        return None;
-    }
-    Some(
-        a.iter()
-            .zip(b.iter())
-            .map(|(x, y)| {
-                matching_numeric_suffix(&x.1, &y.1)
-                    .map(|suffix| format_dimension(x.0 - y.0, suffix))
             })
             .collect::<Option<Vec<_>>>()?
             .join(" "),
@@ -2142,9 +2151,6 @@ fn resolve_animation_motion_path(
     if anim.kind != SvgAnimationKind::AnimateMotion {
         return None;
     }
-    if let Some(path) = &anim.path {
-        return Some(path.clone());
-    }
     let href = node
         .children
         .iter()
@@ -2154,11 +2160,10 @@ fn resolve_animation_motion_path(
                 .attr("href")
                 .or_else(|| attr_ns(child, "xlink", "href"))
                 .and_then(|href| href.strip_prefix('#'))
-        })?;
-    id_paths
-        .iter()
-        .find(|(id, _, _)| id == href)
-        .and_then(|(_, _, d)| d.clone())
+        });
+    href.and_then(|href| id_paths.iter().find(|(id, _, _)| id == href)
+        .and_then(|(_, _, d)| d.clone()))
+        .or_else(|| anim.path.clone())
 }
 
 fn sample_motion_transform(
@@ -2229,7 +2234,24 @@ fn motion_transform_at_progress(
         let nums = parse_number_tokens(&value)?;
         (*nums.first()?, *nums.get(1).unwrap_or(&0.0), 0.0)
     } else {
-        return None;
+        let from = match anim.values.from.as_deref() {
+            Some(value) => motion_coordinate_pair(value)?,
+            None => [0.0, 0.0],
+        };
+        let to = if let Some(to) = anim.values.to.as_deref() {
+            motion_coordinate_pair(to)?
+        } else if let Some(by) = anim.values.by.as_deref() {
+            let by = motion_coordinate_pair(by)?;
+            [from[0] + by[0], from[1] + by[1]]
+        } else if anim.values.from.is_some() {
+            from
+        } else {
+            return None;
+        };
+        let value = sample_animation_at_progress(anim, motion_progress, Some("0 0"))?;
+        let [x, y] = motion_coordinate_pair(&value)?;
+        let angle = (to[1] - from[1]).atan2(to[0] - from[0]).to_degrees();
+        (x, y, angle)
     };
 
     let mut transform = format!("translate({} {})", format_number(x), format_number(y));
@@ -2241,12 +2263,26 @@ fn motion_transform_at_progress(
         };
         transform.push_str(&format!(" rotate({})", format_number(degrees)));
     }
+    let mut composition = anim.clone();
+    if motion_path.is_none() && anim.path.is_none() && anim.values.values.is_empty()
+        && anim.values.from.is_none() && anim.values.to.is_none() && anim.values.by.is_some()
+    {
+        composition.additive = SvgAdditiveMode::Sum;
+    }
     Some(compose_additive_value(
-        anim,
+        &composition,
         "transform",
         base_value,
         &transform,
     ))
+}
+
+fn motion_coordinate_pair(raw: &str) -> Option<[f32; 2]> {
+    let components = parse_numeric_components(raw)?;
+    if components.len() != 2 || components.iter().any(|(value, unit)| {
+        !value.is_finite() || (!unit.is_empty() && unit != "px")
+    }) { return None; }
+    Some([components[0].0, components[1].0])
 }
 
 fn motion_path_progress(anim: &SvgAnimationElement, progress: f32) -> f32 {
@@ -2264,38 +2300,12 @@ fn motion_path_progress(anim: &SvgAnimationElement, progress: f32) -> f32 {
 
 fn sample_motion_path(path: &str, progress: f32) -> Option<(f32, f32, f32)> {
     let parsed = parse_path_data(path)?;
-    let points = flatten_path_points(&parsed);
-    if points.len() < 2 {
+    let metrics = measure_path(&parsed);
+    if metrics.length() <= 0.0 {
         return None;
     }
-    let mut segments = Vec::new();
-    let mut total = 0.0;
-    for pair in points.windows(2) {
-        let (x1, y1) = pair[0];
-        let (x2, y2) = pair[1];
-        let len = ((x2 - x1).powi(2) + (y2 - y1).powi(2)).sqrt();
-        if len > 0.0 {
-            segments.push((x1, y1, x2, y2, len));
-            total += len;
-        }
-    }
-    if total <= 0.0 {
-        return None;
-    }
-    let mut target = total * progress.clamp(0.0, 1.0);
-    for (x1, y1, x2, y2, len) in segments {
-        if target <= len {
-            let t = if len > 0.0 { target / len } else { 0.0 };
-            let x = x1 + (x2 - x1) * t;
-            let y = y1 + (y2 - y1) * t;
-            let angle = (y2 - y1).atan2(x2 - x1).to_degrees();
-            return Some((x, y, angle));
-        }
-        target -= len;
-    }
-    let (x1, y1) = *points.get(points.len().saturating_sub(2))?;
-    let (x2, y2) = *points.last()?;
-    Some((x2, y2, (y2 - y1).atan2(x2 - x1).to_degrees()))
+    let (x, y, angle) = metrics.point_at_distance(metrics.length() * progress.clamp(0.0, 1.0))?;
+    Some((x, y, angle.to_degrees()))
 }
 
 fn node_at_path_mut<'a>(node: &'a mut SvgNode, path: &[usize]) -> Option<&'a mut SvgNode> {
@@ -2605,6 +2615,21 @@ mod tests {
     }
 
     #[test]
+    fn animate_motion_does_not_travel_between_disconnected_subpaths() {
+        let doc = parse_svg_document(
+            r#"<svg><rect><animateMotion path="M0 0 L10 0 M100 100 L100 110" dur="4s" rotate="auto"/></rect></svg>"#,
+        ).unwrap();
+        for (time, expected) in [
+            (1.0, "translate(5 0) rotate(0)"),
+            (3.0, "translate(100 105) rotate(90)"),
+        ] {
+            let overrides = sample_svg_animation_overrides(&doc, time, &mut false);
+            let sampled = svg_document_with_animation_overrides(&doc, &overrides);
+            assert_eq!(sampled.root.children[0].attr("transform"), Some(expected));
+        }
+    }
+
+    #[test]
     fn animate_motion_samples_path_as_transform() {
         let doc = parse_svg_document(
             r#"<svg><rect><animateMotion path="M 0 0 L 20 0" dur="2s" rotate="auto"/></rect></svg>"#,
@@ -2621,6 +2646,52 @@ mod tests {
                 "translate(10 0) rotate(0)".to_string()
             )]
         );
+    }
+
+    #[test]
+    fn motion_preserves_base_and_animated_transform_in_either_document_order() {
+        for animations in [
+            r#"<animateMotion path="M0 0L20 0" dur="2s"/><animateTransform attributeName="transform" type="scale" from="1" to="3" dur="2s"/>"#,
+            r#"<animateTransform attributeName="transform" type="scale" from="1" to="3" dur="2s"/><animateMotion path="M0 0L20 0" dur="2s"/>"#,
+        ] {
+            let doc = parse_svg_document(&format!(r#"<svg><rect transform="rotate(30)">{animations}</rect></svg>"#)).unwrap();
+            let mut running = false;
+            let overrides = sample_svg_animation_overrides(&doc, 1.0, &mut running);
+            let sampled = svg_document_with_animation_overrides(&doc, &overrides);
+            assert_eq!(sampled.root.children[0].attr("transform"), Some("scale(2) translate(10 0)"));
+        }
+        let doc = parse_svg_document(r#"<svg><rect transform="rotate(30)"><animateMotion path="M0 0L20 0" dur="2s"/></rect></svg>"#).unwrap();
+        let overrides = sample_svg_animation_overrides(&doc, 1.0, &mut false);
+        let sampled = svg_document_with_animation_overrides(&doc, &overrides);
+        assert_eq!(sampled.root.children[0].attr("transform"), Some("rotate(30) translate(10 0)"));
+    }
+
+    #[test]
+    fn motion_from_to_from_by_and_by_only_sample_coordinates() {
+        for (attributes, expected) in [
+            (r#"from="10 20" to="30 40""#, "translate(20 30) rotate(45)"),
+            (r#"from="10 20" by="20 20""#, "translate(20 30) rotate(45)"),
+            (r#"by="20 20""#, "translate(10 10) rotate(45)"),
+            (r#"from="10 20" to="10 20""#, "translate(10 20) rotate(0)"),
+        ] {
+            let doc = parse_svg_document(&format!(r#"<svg><rect><animateMotion {attributes} dur="2s" rotate="auto"/></rect></svg>"#)).unwrap();
+            let overrides = sample_svg_animation_overrides(&doc, 1.0, &mut false);
+            let sampled = svg_document_with_animation_overrides(&doc, &overrides);
+            assert_eq!(sampled.root.children[0].attr("transform"), Some(expected), "{attributes}");
+        }
+    }
+
+    #[test]
+    fn motion_replace_and_sum_affect_only_supplemental_motion_stack() {
+        for (additive, expected) in [
+            ("replace", "scale(2) translate(0 20)"),
+            ("sum", "scale(2) translate(10 0) translate(0 20)"),
+        ] {
+            let doc = parse_svg_document(&format!(r#"<svg><rect transform="scale(2)"><animateMotion path="M0 0L20 0" dur="2s"/><animateMotion path="M0 0L0 40" dur="2s" additive="{additive}"/></rect></svg>"#)).unwrap();
+            let overrides = sample_svg_animation_overrides(&doc, 1.0, &mut false);
+            let sampled = svg_document_with_animation_overrides(&doc, &overrides);
+            assert_eq!(sampled.root.children[0].attr("transform"), Some(expected));
+        }
     }
 
     #[test]
@@ -2832,7 +2903,7 @@ mod tests {
     }
 
     #[test]
-    fn accumulate_adds_completed_iteration_delta() {
+    fn accumulate_adds_completed_iteration_endpoint() {
         let doc = parse_svg_document(
             r#"<svg><rect><animate attributeName="x" values="0;10" dur="1s" repeatCount="3" accumulate="sum"/></rect></svg>"#,
         )
@@ -3100,7 +3171,7 @@ mod tests {
     }
 
     #[test]
-    fn accumulate_from_by_uses_by_as_iteration_delta() {
+    fn accumulate_from_by_uses_from_plus_by_as_iteration_endpoint() {
         let doc = parse_svg_document(
             r#"<svg><rect><animate attributeName="x" from="10" by="5" dur="1s" repeatCount="2" accumulate="sum" fill="freeze"/></rect></svg>"#,
         )
@@ -3108,7 +3179,86 @@ mod tests {
         let mut running = false;
         let frozen = sample_svg_animation_overrides(&doc, 3.0, &mut running);
         assert!(!running);
-        assert_eq!(frozen, vec![(vec![0], "x".to_string(), "20".to_string())]);
+        assert_eq!(frozen, vec![(vec![0], "x".to_string(), "30".to_string())]);
+    }
+
+    #[test]
+    fn accumulate_nonzero_start_uses_endpoint_at_repeat_and_freeze_boundaries() {
+        for endpoints in [r#"values="10;15""#, r#"from="10" to="15""#, r#"from="10" by="5""#] {
+            let doc = parse_svg_document(&format!(
+                r#"<svg><rect><animate attributeName="x" {endpoints} dur="1s" repeatCount="3" accumulate="sum" fill="freeze"/></rect></svg>"#,
+            )).unwrap();
+            for (time, expected) in [
+                (0.0, "10"), (1.0, "25"), (1.5, "27.5"),
+                (2.0, "40"), (2.5, "42.5"), (3.0, "45"), (4.0, "45"),
+            ] {
+                let mut running = false;
+                let values = sample_svg_animation_overrides(&doc, time, &mut running);
+                assert_eq!(values, vec![(vec![0], "x".to_string(), expected.to_string())],
+                    "{endpoints} at {time}");
+                assert_eq!(running, time <= 3.0);
+            }
+        }
+    }
+
+    #[test]
+    fn accumulate_indefinite_repeats_count_completed_iterations() {
+        let doc = parse_svg_document(
+            r#"<svg><rect><animate attributeName="x" from="10" to="15" dur="1s" repeatCount="indefinite" accumulate="sum"/></rect></svg>"#,
+        ).unwrap();
+        for (time, expected) in [(1.5, "27.5"), (2.5, "42.5"), (10.5, "162.5")] {
+            let mut running = false;
+            let values = sample_svg_animation_overrides(&doc, time, &mut running);
+            assert!(running);
+            assert_eq!(values[0].2, expected);
+        }
+    }
+
+    #[test]
+    fn accumulate_transform_adds_endpoint_parameters_not_matrix_or_delta() {
+        let doc = parse_svg_document(
+            r#"<svg><rect><animateTransform attributeName="transform" type="scale" from="2" to="3" dur="4s" repeatCount="3" accumulate="sum" fill="freeze"/></rect></svg>"#,
+        ).unwrap();
+        for (time, expected) in [
+            (0.0, "scale(2)"), (4.0, "scale(5)"), (6.0, "scale(5.5)"),
+            (8.0, "scale(8)"), (12.0, "scale(9)"), (13.0, "scale(9)"),
+        ] {
+            let mut running = false;
+            let values = sample_svg_animation_overrides(&doc, time, &mut running);
+            assert_eq!(values[0].2, expected);
+        }
+    }
+
+    #[test]
+    fn accumulate_to_only_is_ignored_and_by_only_keeps_underlying_once() {
+        for (endpoints, expected, frozen) in [
+            (r#"to="15""#, "10", "15"),
+            (r#"by="5""#, "12.5", "15"),
+        ] {
+            let doc = parse_svg_document(&format!(
+                r#"<svg><rect x="5"><animate attributeName="x" {endpoints} dur="1s" repeatCount="2" accumulate="sum" fill="freeze"/></rect></svg>"#,
+            )).unwrap();
+            let mut running = false;
+            let values = sample_svg_animation_overrides(&doc, 1.5, &mut running);
+            assert_eq!(values[0].2, expected);
+            let values = sample_svg_animation_overrides(&doc, 3.0, &mut running);
+            assert_eq!(values[0].2, frozen);
+        }
+    }
+
+    #[test]
+    fn accumulate_restart_resets_completed_iteration_count() {
+        let doc = parse_svg_document(
+            r#"<svg><rect><animate attributeName="x" from="10" to="15" begin="click" dur="1s" repeatCount="3" accumulate="sum"/></rect></svg>"#,
+        ).unwrap();
+        let controls = vec![
+            (vec![0, 0], "begin".to_string(), 0.0),
+            (vec![0, 0], "begin".to_string(), 2.0),
+        ];
+        let mut running = false;
+        let values = sample_svg_animation_overrides_with_controls(&doc, 2.5, &controls, &mut running);
+        assert!(running);
+        assert_eq!(values[0].2, "12.5");
     }
 
     #[test]

@@ -6,6 +6,7 @@
 pub mod animation;
 pub(crate) mod condition;
 pub mod geometry;
+mod morphology;
 pub mod paint;
 pub mod parser;
 pub mod path;

@@ -2,8 +2,58 @@
 
 use tiny_skia::{Path, PathSegment, Transform};
 
-pub(crate) fn flatten_path_points(path: &Path) -> Vec<(f32, f32)> {
-    let mut points = Vec::new();
+struct MeasuredSegment {
+    from: (f32, f32),
+    to: (f32, f32),
+    end_distance: f32,
+    length: f32,
+    angle: f32,
+}
+
+pub(crate) struct PathMetrics {
+    segments: Vec<MeasuredSegment>,
+    length: f32,
+}
+
+impl PathMetrics {
+    fn push(&mut self, from: (f32, f32), to: (f32, f32)) {
+        let length = segment_length(from, to);
+        if !length.is_finite() || length <= f32::EPSILON {
+            return;
+        }
+        self.length += length;
+        self.segments.push(MeasuredSegment {
+            from,
+            to,
+            end_distance: self.length,
+            length,
+            angle: (to.1 - from.1).atan2(to.0 - from.0),
+        });
+    }
+
+    pub(crate) fn length(&self) -> f32 {
+        self.length
+    }
+
+    pub(crate) fn point_at_distance(&self, distance: f32) -> Option<(f32, f32, f32)> {
+        if distance.is_nan() {
+            return None;
+        }
+        let distance = distance.clamp(0.0, self.length);
+        let index = self.segments.partition_point(|segment| segment.end_distance < distance);
+        let segment = self.segments.get(index)?;
+        let start_distance = if index == 0 { 0.0 } else { self.segments[index - 1].end_distance };
+        let t = ((distance - start_distance) / segment.length).clamp(0.0, 1.0);
+        Some((
+            segment.from.0 + (segment.to.0 - segment.from.0) * t,
+            segment.from.1 + (segment.to.1 - segment.from.1) * t,
+            segment.angle,
+        ))
+    }
+}
+
+pub(crate) fn measure_path(path: &Path) -> PathMetrics {
+    let mut metrics = PathMetrics { segments: Vec::new(), length: 0.0 };
     let mut start = (0.0f32, 0.0f32);
     let mut current = (0.0f32, 0.0f32);
     for segment in path.segments() {
@@ -11,41 +61,37 @@ pub(crate) fn flatten_path_points(path: &Path) -> Vec<(f32, f32)> {
             PathSegment::MoveTo(p) => {
                 start = (p.x, p.y);
                 current = start;
-                points.push(current);
             }
             PathSegment::LineTo(p) => {
-                current = (p.x, p.y);
-                points.push(current);
+                let end = (p.x, p.y);
+                metrics.push(current, end);
+                current = end;
             }
             PathSegment::QuadTo(c, p) => {
                 let end = (p.x, p.y);
-                for (_, to) in flatten_quad_points(current, (c.x, c.y), end) {
-                    points.push(to);
-                }
+                flatten_quad_points(current, (c.x, c.y), end, &mut metrics);
                 current = end;
             }
             PathSegment::CubicTo(c1, c2, p) => {
                 let end = (p.x, p.y);
-                for (_, to) in flatten_cubic_points(current, (c1.x, c1.y), (c2.x, c2.y), end) {
-                    points.push(to);
-                }
+                flatten_cubic_points(current, (c1.x, c1.y), (c2.x, c2.y), end, &mut metrics);
                 current = end;
             }
             PathSegment::Close => {
+                metrics.push(current, start);
                 current = start;
-                points.push(current);
             }
         }
     }
-    points
+    metrics
 }
 
 fn flatten_quad_points(
     p0: (f32, f32),
     c: (f32, f32),
     p1: (f32, f32),
-) -> Vec<((f32, f32), (f32, f32))> {
-    let mut out = Vec::new();
+    metrics: &mut PathMetrics,
+) {
     let mut prev = p0;
     for i in 1..=16 {
         let t = i as f32 / 16.0;
@@ -54,10 +100,9 @@ fn flatten_quad_points(
             mt * mt * p0.0 + 2.0 * mt * t * c.0 + t * t * p1.0,
             mt * mt * p0.1 + 2.0 * mt * t * c.1 + t * t * p1.1,
         );
-        out.push((prev, next));
+        metrics.push(prev, next);
         prev = next;
     }
-    out
 }
 
 fn flatten_cubic_points(
@@ -65,8 +110,8 @@ fn flatten_cubic_points(
     c1: (f32, f32),
     c2: (f32, f32),
     p1: (f32, f32),
-) -> Vec<((f32, f32), (f32, f32))> {
-    let mut out = Vec::new();
+    metrics: &mut PathMetrics,
+) {
     let mut prev = p0;
     for i in 1..=24 {
         let t = i as f32 / 24.0;
@@ -81,45 +126,9 @@ fn flatten_cubic_points(
                 + 3.0 * mt * t.powi(2) * c2.1
                 + t.powi(3) * p1.1,
         );
-        out.push((prev, next));
+        metrics.push(prev, next);
         prev = next;
     }
-    out
-}
-
-pub(crate) fn path_polyline_length(points: &[(f32, f32)]) -> f32 {
-    points
-        .windows(2)
-        .map(|pair| segment_length(pair[0], pair[1]))
-        .sum()
-}
-
-pub(crate) fn point_at_path_distance(
-    points: &[(f32, f32)],
-    distance: f32,
-) -> Option<(f32, f32, f32)> {
-    let mut remaining = distance.max(0.0);
-    for pair in points.windows(2) {
-        let from = pair[0];
-        let to = pair[1];
-        let len = segment_length(from, to);
-        if len <= f32::EPSILON {
-            continue;
-        }
-        if remaining <= len {
-            let t = remaining / len;
-            let x = from.0 + (to.0 - from.0) * t;
-            let y = from.1 + (to.1 - from.1) * t;
-            return Some((x, y, (to.1 - from.1).atan2(to.0 - from.0)));
-        }
-        remaining -= len;
-    }
-    points.windows(2).last().and_then(|pair| {
-        let from = pair[0];
-        let to = pair[1];
-        let len = segment_length(from, to);
-        (len > f32::EPSILON).then(|| (to.0, to.1, (to.1 - from.1).atan2(to.0 - from.0)))
-    })
 }
 
 fn segment_length(from: (f32, f32), to: (f32, f32)) -> f32 {
@@ -193,12 +202,34 @@ mod tests {
     fn relative_arc_circle_path_has_expected_length() {
         let data = "M337.5,337.5 m-320,0 a320,320 0 1,1 640,0 a320,320 0 1,1 -640,0";
         let path = parse_path_data(data).expect("circle path parses");
-        let points = flatten_path_points(&path);
-        let length = path_polyline_length(&points);
+        let length = measure_path(&path).length();
         let expected = std::f32::consts::TAU * 320.0;
         assert!(
             (length - expected).abs() < 20.0,
             "length {length} should be close to circumference {expected}"
         );
+    }
+
+    #[test]
+    fn measured_paths_do_not_connect_moveto_subpaths() {
+        let path = parse_path_data("M0 0 L10 0 M100 100 L100 110 M500 500").unwrap();
+        let metrics = measure_path(&path);
+        assert_eq!(metrics.length(), 20.0);
+        assert_eq!(metrics.point_at_distance(5.0), Some((5.0, 0.0, 0.0)));
+        assert_eq!(metrics.point_at_distance(10.0), Some((10.0, 0.0, 0.0)));
+        assert_eq!(metrics.point_at_distance(15.0), Some((100.0, 105.0, std::f32::consts::FRAC_PI_2)));
+        assert_eq!(metrics.point_at_distance(100.0), Some((100.0, 110.0, std::f32::consts::FRAC_PI_2)));
+        assert_eq!(metrics.point_at_distance(-1.0), metrics.point_at_distance(0.0));
+        assert_eq!(metrics.point_at_distance(f32::NAN), None);
+    }
+
+    #[test]
+    fn measured_paths_preserve_close_and_ignore_zero_length_segments() {
+        let path = parse_path_data("M0 0 L3 0 L3 4 Z M50 50 L50 50").unwrap();
+        let metrics = measure_path(&path);
+        assert_eq!(metrics.length(), 12.0);
+        let (x, y, _) = metrics.point_at_distance(9.5).unwrap();
+        assert!((x - 1.5).abs() < 0.001 && (y - 2.0).abs() < 0.001);
+        assert_eq!(metrics.point_at_distance(12.0).unwrap().0, 0.0);
     }
 }

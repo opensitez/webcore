@@ -111,27 +111,16 @@ pub fn parse_svg_length(input: &str) -> Option<SvgLength> {
         return None;
     }
 
-    let num_end = token
-        .char_indices()
-        .take_while(|(_, c)| c.is_ascii_digit() || matches!(c, '.' | '+' | '-'))
-        .last()
-        .map(|(idx, c)| idx + c.len_utf8())
-        .unwrap_or(0);
-    if num_end == 0 {
-        return None;
+    if let Ok(value) = token.parse::<f32>() {
+        return value.is_finite().then_some(SvgLength::Number(value));
     }
-    let (num, unit) = token.split_at(num_end);
-    let value = num.parse::<f32>().ok()?;
-    if !value.is_finite() {
-        return None;
-    }
-
-    match unit {
-        "" => Some(SvgLength::Number(value)),
-        "%" => Some(SvgLength::Percent(value)),
-        unit if unit.eq_ignore_ascii_case("px") => Some(SvgLength::Px(value)),
-        unit if unit.eq_ignore_ascii_case("em") => Some(SvgLength::Em(value)),
-        unit if unit.eq_ignore_ascii_case("rem") => Some(SvgLength::Rem(value)),
+    use crate::types::CssLength;
+    match crate::css::parse_length_checked(token)? {
+        CssLength::Zero => Some(SvgLength::Number(0.0)),
+        CssLength::Px(value) if value.is_finite() => Some(SvgLength::Px(value)),
+        CssLength::Percent(value) if value.is_finite() => Some(SvgLength::Percent(value)),
+        CssLength::Em(value) if value.is_finite() => Some(SvgLength::Em(value)),
+        CssLength::Rem(value) if value.is_finite() => Some(SvgLength::Rem(value)),
         _ => None,
     }
 }
@@ -198,6 +187,24 @@ pub fn parse_preserve_aspect_ratio(value: Option<&str>) -> PreserveAspectRatio {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lengths_reuse_css_scientific_notation_and_absolute_units() {
+        assert_eq!(parse_svg_length("1e2"), Some(SvgLength::Number(100.0)));
+        for token in ["1in", "2.54cm", "25.4mm", "101.6Q", "72pt", "6pc", "9.6e1PX"] {
+            let SvgLength::Px(value) = parse_svg_length(token).unwrap() else { panic!("{token}") };
+            assert!((value - 96.0).abs() < 0.0001, "{token}: {value}");
+            assert!((super::super::source::parse_svg_length_px(token).unwrap() - 96.0).abs() < 0.0001);
+        }
+        assert_eq!(parse_svg_length("1e1%"), Some(SvgLength::Percent(10.0)));
+        assert_eq!(parse_svg_length("1e-1em"), Some(SvgLength::Em(0.1)));
+        for token in ["NaN", "inf", "1e99", "1e99px", "1garbage", "1e+px"] {
+            assert_eq!(parse_svg_length(token), None, "{token}");
+        }
+        assert_eq!(super::super::source::parse_svg_length_px("100%"), None);
+        assert_eq!(super::super::source::parse_svg_length_px("2em"), None);
+        assert_eq!(intrinsic_size_from_markup("<svg width='1in' height='1e1px'/>") , (96.0, 10.0));
+    }
 
     #[test]
     fn intrinsic_size_uses_definite_width_and_height() {

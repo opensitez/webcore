@@ -6,6 +6,8 @@
 use super::animation::parse_animation_element;
 use super::tree::{SvgAttribute, SvgDocument, SvgNode};
 
+const MAX_ELEMENT_DEPTH: usize = 256;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SvgParseError {
     pub message: String,
@@ -26,7 +28,7 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn parse_element(&mut self) -> Result<SvgNode, SvgParseError> {
+    fn parse_open_element(&mut self) -> Result<(SvgNode, bool, String), SvgParseError> {
         self.expect("<")?;
         if self.starts_with("/") {
             return Err(self.error("unexpected closing tag"));
@@ -38,24 +40,38 @@ impl<'a> Parser<'a> {
             self.skip_ws();
             if self.consume("/>") {
                 node.animation = parse_animation_element(&node);
-                return Ok(node);
+                return Ok((node, true, name.to_string()));
             }
             if self.consume(">") {
                 break;
             }
             node.attributes.push(self.parse_attribute()?);
         }
+        Ok((node, false, name.to_string()))
+    }
 
+    fn parse_element(&mut self) -> Result<SvgNode, SvgParseError> {
+        let (root, closed, name) = self.parse_open_element()?;
+        if closed { return Ok(root); }
+        let mut stack = vec![(root, name)];
         loop {
             if self.pos >= self.input.len() {
-                node.animation = parse_animation_element(&node);
-                return Ok(node);
+                while let Some((mut node, _)) = stack.pop() {
+                    node.animation = parse_animation_element(&node);
+                    if let Some(parent) = stack.last_mut() {
+                        parent.0.children.push(node);
+                    } else {
+                        return Ok(node);
+                    }
+                }
+                unreachable!("SVG parser retains its open root");
             }
             if self.starts_with("</") {
                 self.pos += 2;
                 let close = self.parse_name()?;
                 self.skip_ws();
                 self.expect(">")?;
+                let (mut node, name) = stack.pop().expect("SVG parser retains its open root");
                 if close != name {
                     return Err(self.error(&format!(
                         "mismatched closing tag: expected </{}>, got </{}>",
@@ -63,6 +79,10 @@ impl<'a> Parser<'a> {
                     )));
                 }
                 node.animation = parse_animation_element(&node);
+                if let Some(parent) = stack.last_mut() {
+                    parent.0.children.push(node);
+                    continue;
+                }
                 return Ok(node);
             }
             if self.starts_with("<!--") {
@@ -74,19 +94,27 @@ impl<'a> Parser<'a> {
                 continue;
             }
             if self.starts_with("<![CDATA[") {
-                node.text.push_str(self.parse_cdata()?);
+                stack.last_mut().unwrap().0.append_text(self.parse_cdata()?);
                 continue;
             }
             if self.starts_with("<") {
-                node.children.push(self.parse_element()?);
+                if stack.len() >= MAX_ELEMENT_DEPTH {
+                    return Err(self.error("SVG element nesting limit exceeded"));
+                }
+                let (child, closed, name) = self.parse_open_element()?;
+                if closed {
+                    stack.last_mut().unwrap().0.children.push(child);
+                } else {
+                    stack.push((child, name));
+                }
                 continue;
             }
             let text = self.parse_text();
             if !text.is_empty() {
                 if text.contains('&') {
-                    node.text.push_str(&decode_xml_entities(text));
+                    stack.last_mut().unwrap().0.append_text(&decode_xml_entities(text));
                 } else {
-                    node.text.push_str(text);
+                    stack.last_mut().unwrap().0.append_text(text);
                 }
             } else if self.pos < self.input.len() {
                 let ch = self.peek_char().expect("pos checked");
@@ -321,10 +349,101 @@ fn decode_xml_entities(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::tree::{SvgContent, SvgTextRun};
     use crate::svg::{
         SvgAdditiveMode, SvgAnimateTransformType, SvgAnimationFillMode, SvgAnimationKind,
         SvgAnimationTime, SvgCalcMode, SvgElementKind, SvgRepeatCount,
     };
+
+    #[test]
+    fn direct_text_stays_ordered_between_multiple_element_children() {
+        let doc = parse_svg_document(
+            "<svg><text>A<tspan>B</tspan>C<textPath>D</textPath>E</text></svg>",
+        ).unwrap();
+        let node = &doc.root.children[0];
+        assert_eq!(node.text, "ACE");
+        assert_eq!(node.children.len(), 2);
+        assert_eq!(node.text_runs, vec![
+            SvgTextRun { range: 0..1, before_child: 0 },
+            SvgTextRun { range: 1..2, before_child: 1 },
+            SvgTextRun { range: 2..3, before_child: 2 },
+        ]);
+        assert_eq!(node.content().collect::<Vec<_>>(), vec![
+            SvgContent::Text("A"), SvgContent::Element(0, &node.children[0]),
+            SvgContent::Text("C"), SvgContent::Element(1, &node.children[1]),
+            SvgContent::Text("E"),
+        ]);
+        assert_eq!(node.children[0].content().collect::<Vec<_>>(), vec![SvgContent::Text("B")]);
+        assert_eq!(node.children[1].content().collect::<Vec<_>>(), vec![SvgContent::Text("D")]);
+    }
+
+    #[test]
+    fn unicode_entities_and_cdata_keep_utf8_ranges_and_order() {
+        let doc = parse_svg_document(
+            "<svg><text>\u{e9}&#x1F642;<![CDATA[&\u{3bb}]]><tspan>\u{65e5}</tspan>&amp;\u{7d42}<![CDATA[<]]></text></svg>",
+        ).unwrap();
+        let node = &doc.root.children[0];
+        let leading = "\u{e9}\u{1f642}&\u{3bb}";
+        let trailing = "&\u{7d42}<";
+        assert_eq!(node.text, format!("{leading}{trailing}"));
+        assert_eq!(node.text_runs, vec![
+            SvgTextRun { range: 0..leading.len(), before_child: 0 },
+            SvgTextRun { range: leading.len()..node.text.len(), before_child: 1 },
+        ]);
+        assert_eq!(node.content().collect::<Vec<_>>(), vec![
+            SvgContent::Text(leading), SvgContent::Element(0, &node.children[0]),
+            SvgContent::Text(trailing),
+        ]);
+        assert_eq!(node.children[0].text, "\u{65e5}");
+        for run in &node.text_runs {
+            assert!(node.text.is_char_boundary(run.range.start));
+            assert!(node.text.is_char_boundary(run.range.end));
+        }
+    }
+
+    #[test]
+    fn comments_and_cdata_merge_without_creating_element_indices() {
+        let doc = parse_svg_document(
+            "<svg><text>a<!-- ignored --><![CDATA[b]]>&#99;<tspan/>d<!-- ignored --><![CDATA[e]]>f</text></svg>",
+        ).unwrap();
+        let node = &doc.root.children[0];
+        assert_eq!(node.text, "abcdef");
+        assert_eq!(node.children.len(), 1);
+        assert_eq!(node.text_runs, vec![
+            SvgTextRun { range: 0..3, before_child: 0 },
+            SvgTextRun { range: 3..6, before_child: 1 },
+        ]);
+        assert_eq!(node.content().collect::<Vec<_>>(), vec![
+            SvgContent::Text("abc"), SvgContent::Element(0, &node.children[0]),
+            SvgContent::Text("def"),
+        ]);
+    }
+
+    #[test]
+    fn self_closing_children_keep_element_only_indices_without_leading_text() {
+        let doc = parse_svg_document(
+            "<svg><text><tspan/>first<tspan/>second<tspan/>third</text></svg>",
+        ).unwrap();
+        let node = &doc.root.children[0];
+        assert_eq!(node.text, "firstsecondthird");
+        assert_eq!(node.children.len(), 3);
+        assert_eq!(node.content().collect::<Vec<_>>(), vec![
+            SvgContent::Element(0, &node.children[0]), SvgContent::Text("first"),
+            SvgContent::Element(1, &node.children[1]), SvgContent::Text("second"),
+            SvgContent::Element(2, &node.children[2]), SvgContent::Text("third"),
+        ]);
+    }
+
+    #[test]
+    fn eof_completion_preserves_mixed_content() {
+        let doc = parse_svg_document("<svg><text>a<tspan>b</tspan>c").unwrap();
+        let node = &doc.root.children[0];
+        assert_eq!(node.text, "ac");
+        assert_eq!(node.content().collect::<Vec<_>>(), vec![
+            SvgContent::Text("a"), SvgContent::Element(0, &node.children[0]),
+            SvgContent::Text("c"),
+        ]);
+    }
 
     #[test]
     fn parses_nested_svg_elements() {
@@ -502,6 +621,20 @@ mod tests {
     fn reports_mismatched_closing_tag() {
         let err = parse_svg_document("<svg><g></svg>").unwrap_err();
         assert!(err.message.contains("mismatched closing tag"));
+    }
+
+    #[test]
+    fn bounds_nested_elements_before_recursive_stack_exhaustion() {
+        let at_limit = format!("{}{}", "<g>".repeat(MAX_ELEMENT_DEPTH), "</g>".repeat(MAX_ELEMENT_DEPTH));
+        assert!(parse_svg_document(&at_limit).is_ok());
+        for closed in [false, true] {
+            let mut excessive = "<g>".repeat(20_000);
+            if closed { excessive.push_str(&"</g>".repeat(20_000)); }
+            let err = parse_svg_document(&excessive).unwrap_err();
+            assert_eq!(err.message, "SVG element nesting limit exceeded");
+            assert_eq!(err.offset, MAX_ELEMENT_DEPTH * 3);
+        }
+        assert!(parse_svg_document("<svg><rect width='1' height='1'/></svg>").is_ok());
     }
 
     #[test]

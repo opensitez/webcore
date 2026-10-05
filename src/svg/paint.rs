@@ -5,9 +5,9 @@ use super::geometry::{
     parse_preserve_aspect_ratio, parse_svg_length, parse_view_box,
 };
 use super::path::{
-    flatten_path_points, number, number_list, parse_path_data, parse_transform_list,
-    path_marker_subpaths, path_polyline_length, point_at_path_distance,
+    measure_path, number, number_list, parse_path_data, parse_transform_list, path_marker_subpaths,
 };
+use super::tree::SvgContent;
 use super::{SvgDocument, SvgElementKind, SvgNode, parse_svg_document};
 use crate::canvas::{
     Canvas, Font, FontStyle, FontWeight, Matrix, TextAlign, TextBaseline, TinySkiaCanvas,
@@ -23,8 +23,9 @@ use crate::types::{
     SPECIFIED_SVG_STROKE_WIDTH, WebCore,
 };
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
+use std::rc::Rc;
 use std::sync::{Arc, LazyLock, Mutex};
 use tiny_skia::{
     FillRule, GradientStop as SkGradientStop, LineCap, LineJoin, LinearGradient, Mask, MaskType,
@@ -144,6 +145,7 @@ enum PaintOp {
 
 #[derive(Clone)]
 struct PaintState {
+    remaining_nodes: Rc<Cell<usize>>,
     visible: bool,
     current_color: Color,
     fill: Option<PaintSource>,
@@ -172,6 +174,7 @@ struct PaintState {
     fill_rule: FillRule,
     clip_rule: FillRule,
     mask_type: MaskType,
+    mask: Option<String>,
     stop_color: Color,
     stop_opacity: f32,
     paint_order: [PaintOp; 2],
@@ -181,6 +184,7 @@ struct PaintState {
 impl Default for PaintState {
     fn default() -> Self {
         Self {
+            remaining_nodes: Rc::new(Cell::new(65_536)),
             visible: true,
             current_color: Color::BLACK,
             fill: Some(PaintSource::Color(Color::BLACK)),
@@ -209,6 +213,7 @@ impl Default for PaintState {
             fill_rule: FillRule::Winding,
             clip_rule: FillRule::Winding,
             mask_type: MaskType::Luminance,
+            mask: None,
             stop_color: Color::BLACK,
             stop_opacity: 1.0,
             paint_order: [PaintOp::Fill, PaintOp::Stroke],
@@ -337,7 +342,7 @@ pub(crate) fn rasterize_svg_document_to_rgba_with_dom(
         true,
         dom_root,
     );
-    Some(pixmap.data().to_vec())
+    Some(pixmap.take())
 }
 
 pub fn rasterize_svg_intrinsic(svg: &str) -> Option<(Vec<u8>, u32, u32)> {
@@ -424,6 +429,12 @@ fn paint_node<'a>(
     allow_filter: bool,
     dom_node: Option<&WebCore>,
 ) {
+    // Reference expansion can be exponentially larger than the parsed tree.
+    let remaining = inherited.remaining_nodes.get();
+    if remaining == 0 || stack.len() >= 64 || ancestors.len() >= 256 {
+        return;
+    }
+    inherited.remaining_nodes.set(remaining - 1);
     let mut state = state_for_node(node, inherited, styles, ancestors, dom_node);
     if !state.visible {
         return;
@@ -890,6 +901,9 @@ fn paint_children<'a>(
 ) {
     ancestors.push(node);
     for (index, child) in node.children.iter().enumerate() {
+        if state.remaining_nodes.get() == 0 {
+            break;
+        }
         paint_node(
             child,
             pixmap,
@@ -962,8 +976,10 @@ fn paint_text<'a>(
         x: attr_length(node, "x", LengthAxis::X, state).unwrap_or(0.0),
         y: attr_length(node, "y", LengthAxis::Y, state).unwrap_or(0.0),
     };
-    cursor.x += attr_length(node, "dx", LengthAxis::X, state).unwrap_or(0.0);
-    cursor.y += attr_length(node, "dy", LengthAxis::Y, state).unwrap_or(0.0);
+    if !has_text_position_lists(node) {
+        cursor.x += attr_length(node, "dx", LengthAxis::X, state).unwrap_or(0.0);
+        cursor.y += attr_length(node, "dy", LengthAxis::Y, state).unwrap_or(0.0);
+    }
     let mut text_system = SvgTextSystem::take();
     let (font_system, swash_cache) = text_system.0.as_mut().unwrap();
     if let Some(clip) = clip {
@@ -979,6 +995,8 @@ fn paint_text<'a>(
             styles,
             ancestors,
             &mut cursor,
+            &mut Vec::new(),
+            false,
             font_system,
             swash_cache,
             dom_node,
@@ -995,6 +1013,8 @@ fn paint_text<'a>(
             styles,
             ancestors,
             &mut cursor,
+            &mut Vec::new(),
+            false,
             font_system,
             swash_cache,
             dom_node,
@@ -1007,6 +1027,30 @@ struct TextCursor {
     y: f32,
 }
 
+struct TextPositions {
+    lists: [Vec<f32>; 4],
+    index: usize,
+}
+
+impl TextPositions {
+    fn for_node(node: &SvgNode) -> Self {
+        Self {
+            lists: ["x", "y", "dx", "dy"].map(|name| {
+                node.attr_ascii_case_insensitive(name)
+                    .map(svg_text_length_list)
+                    .unwrap_or_default()
+            }),
+            index: 0,
+        }
+    }
+}
+
+fn positioned_text_active(positions: &[TextPositions]) -> bool {
+    positions
+        .iter()
+        .any(|frame| frame.lists.iter().any(|list| list.len() > 1))
+}
+
 fn paint_text_tree<'a>(
     node: &'a SvgNode,
     pixmap: &mut Pixmap,
@@ -1016,46 +1060,128 @@ fn paint_text_tree<'a>(
     styles: &[CssRule],
     ancestors: &mut Vec<&'a SvgNode>,
     cursor: &mut TextCursor,
+    positions: &mut Vec<TextPositions>,
+    chunk_anchored: bool,
     font_system: &mut cosmic_text::FontSystem,
     swash_cache: &mut cosmic_text::SwashCache,
     dom_node: Option<&WebCore>,
 ) {
-    if !node.text.is_empty() {
-        let target_length = attr_length(node, "textLength", LengthAxis::X, state);
-        let length_adjust = node
-            .attr_ascii_case_insensitive("lengthAdjust")
-            .unwrap_or("spacing")
-            .trim();
-        if has_text_position_lists(node) {
-            let _ = paint_positioned_text_onto(
-                pixmap,
-                state,
-                transform,
-                node,
-                &node.text,
-                cursor,
-                font_system,
-                swash_cache,
-            );
-        } else {
-            let advance = paint_text_onto(
-                pixmap,
-                state,
-                transform,
-                &node.text,
-                cursor.x,
-                cursor.y,
-                target_length,
-                length_adjust,
-                font_system,
-                swash_cache,
-            );
-            cursor.x += advance;
+    let mut node_positions = TextPositions::for_node(node);
+    if !positioned_text_active(positions) && !has_text_position_lists(node) {
+        // Scalar positions were applied when entering this ordinary text run.
+        // A deeper list must not apply those offsets a second time.
+        for list in &mut node_positions.lists {
+            list.clear();
         }
+    }
+    positions.push(node_positions);
+    let target_length = attr_length(node, "textLength", LengthAxis::X, state);
+    let length_adjust = node
+        .attr_ascii_case_insensitive("lengthAdjust")
+        .unwrap_or("spacing")
+        .trim();
+    let direct_runs = node.content().filter_map(|part| match part {
+        SvgContent::Text(text) => Some(text),
+        _ => None,
+    });
+    let split_runs = node
+        .content()
+        .filter(|part| matches!(part, SvgContent::Text(_)))
+        .count()
+        > 1;
+    let direct_count = node.text.chars().count();
+    let mut direct_index = 0;
+    // Share the existing direct-text length adjustment across run boundaries.
+    let split_spacing = if split_runs && direct_count > 1 && target_length.is_some() {
+        let mut canvas = TinySkiaCanvas::with_text(pixmap, font_system, swash_cache);
+        canvas.set_font(&Font {
+            family: state.font_family.clone(),
+            size: state.font_size.max(1.0),
+            weight: state.font_weight,
+            style: state.font_style,
+        });
+        let natural = direct_runs
+            .map(|text| canvas.measure_text(text).width)
+            .sum();
+        text_length_extra_spacing(&node.text, natural, target_length)
+    } else {
+        0.0
+    };
+
+    let mut content_state = state.clone();
+    let anchor_here = !chunk_anchored
+        && split_runs
+        && matches!(
+            state.text_align,
+            TextAlign::Center | TextAlign::End | TextAlign::Right
+        )
+        && !positioned_text_active(positions)
+        && text_is_single_chunk(node);
+    if anchor_here {
+        let advance = measure_text_tree_advance(
+            node,
+            pixmap,
+            state,
+            styles,
+            ancestors,
+            font_system,
+            swash_cache,
+            dom_node,
+        );
+        cursor.x -= match state.text_align {
+            TextAlign::Center => advance / 2.0,
+            TextAlign::End | TextAlign::Right => advance,
+            _ => 0.0,
+        };
+        content_state.text_align = TextAlign::Start;
+    }
+    if chunk_anchored {
+        content_state.text_align = TextAlign::Start;
     }
 
     ancestors.push(node);
-    for (index, child) in node.children.iter().enumerate() {
+    for part in node.content() {
+        let (index, child) = match part {
+            SvgContent::Text(text) => {
+                if positioned_text_active(positions) {
+                    let _ = paint_positioned_text_onto(
+                        pixmap,
+                        &content_state,
+                        transform,
+                        positions,
+                        text,
+                        cursor,
+                        font_system,
+                        swash_cache,
+                    );
+                } else {
+                    let mut run_state = content_state.clone();
+                    run_state.letter_spacing += split_spacing;
+                    let advance = paint_text_onto(
+                        pixmap,
+                        &run_state,
+                        transform,
+                        text,
+                        cursor.x,
+                        cursor.y,
+                        if split_runs { None } else { target_length },
+                        length_adjust,
+                        font_system,
+                        swash_cache,
+                    );
+                    let count = text.chars().count();
+                    let gaps =
+                        count.saturating_sub(usize::from(direct_index + count == direct_count));
+                    cursor.x += advance + split_spacing * gaps as f32;
+                    for frame in positions.iter_mut() {
+                        frame.index += count;
+                    }
+                }
+                direct_index += text.chars().count();
+                continue;
+            }
+            SvgContent::Element(index, child) => (index, child),
+        };
         if !matches!(
             child.kind,
             SvgElementKind::Text | SvgElementKind::Tspan | SvgElementKind::TextPath
@@ -1063,7 +1189,8 @@ fn paint_text_tree<'a>(
             continue;
         }
         let child_dom = dom_node.and_then(|dom| svg_dom_child(dom, index));
-        let child_state = state_for_node(child, state.clone(), styles, ancestors, child_dom);
+        let child_state =
+            state_for_node(child, content_state.clone(), styles, ancestors, child_dom);
         if matches!(child.kind, SvgElementKind::TextPath) {
             cursor.x += paint_text_path(
                 child,
@@ -1074,20 +1201,26 @@ fn paint_text_tree<'a>(
                 font_system,
                 swash_cache,
             );
+            let count = collect_svg_text(child).chars().count();
+            for frame in positions.iter_mut() {
+                frame.index += count;
+            }
             continue;
         }
         let old_cursor = TextCursor {
             x: cursor.x,
             y: cursor.y,
         };
-        if let Some(x) = attr_length(child, "x", LengthAxis::X, &child_state) {
-            cursor.x = x;
+        if !positioned_text_active(positions) && !has_text_position_lists(child) {
+            if let Some(x) = attr_length(child, "x", LengthAxis::X, &child_state) {
+                cursor.x = x;
+            }
+            if let Some(y) = attr_length(child, "y", LengthAxis::Y, &child_state) {
+                cursor.y = y;
+            }
+            cursor.x += attr_length(child, "dx", LengthAxis::X, &child_state).unwrap_or(0.0);
+            cursor.y += attr_length(child, "dy", LengthAxis::Y, &child_state).unwrap_or(0.0);
         }
-        if let Some(y) = attr_length(child, "y", LengthAxis::Y, &child_state) {
-            cursor.y = y;
-        }
-        cursor.x += attr_length(child, "dx", LengthAxis::X, &child_state).unwrap_or(0.0);
-        cursor.y += attr_length(child, "dy", LengthAxis::Y, &child_state).unwrap_or(0.0);
         paint_text_tree(
             child,
             pixmap,
@@ -1097,6 +1230,10 @@ fn paint_text_tree<'a>(
             styles,
             ancestors,
             cursor,
+            positions,
+            (chunk_anchored || anchor_here)
+                && child.attr("x").is_none()
+                && child.attr("y").is_none(),
             font_system,
             swash_cache,
             child_dom,
@@ -1106,12 +1243,88 @@ fn paint_text_tree<'a>(
         }
     }
     ancestors.pop();
+    positions.pop();
+}
+
+fn text_is_single_chunk(node: &SvgNode) -> bool {
+    node.children
+        .iter()
+        .filter(|child| {
+            matches!(
+                child.kind,
+                SvgElementKind::Text | SvgElementKind::Tspan | SvgElementKind::TextPath
+            )
+        })
+        .all(|child| {
+            !matches!(child.kind, SvgElementKind::TextPath)
+                && child.attr("x").is_none()
+                && child.attr("y").is_none()
+                && !has_text_position_lists(child)
+                && text_is_single_chunk(child)
+        })
+}
+
+fn measure_text_tree_advance<'a>(
+    node: &'a SvgNode,
+    pixmap: &mut Pixmap,
+    state: &PaintState,
+    styles: &[CssRule],
+    ancestors: &mut Vec<&'a SvgNode>,
+    font_system: &mut cosmic_text::FontSystem,
+    swash_cache: &mut cosmic_text::SwashCache,
+    dom_node: Option<&WebCore>,
+) -> f32 {
+    let mut canvas = TinySkiaCanvas::with_text(pixmap, font_system, swash_cache);
+    canvas.set_font(&Font {
+        family: state.font_family.clone(),
+        size: state.font_size.max(1.0),
+        weight: state.font_weight,
+        style: state.font_style,
+    });
+    let direct = node
+        .content()
+        .filter_map(|part| match part {
+            SvgContent::Text(text) => Some(canvas.measure_text(text).width),
+            _ => None,
+        })
+        .sum();
+    let mut advance = text_length_adjusted_advance(
+        &node.text,
+        direct,
+        attr_length(node, "textLength", LengthAxis::X, state),
+    );
+    drop(canvas);
+    ancestors.push(node);
+    for (index, child) in node.children.iter().enumerate() {
+        if matches!(child.kind, SvgElementKind::Text | SvgElementKind::Tspan) {
+            let child_dom = dom_node.and_then(|dom| svg_dom_child(dom, index));
+            let child_state = state_for_node(child, state.clone(), styles, ancestors, child_dom);
+            advance += attr_length(child, "dx", LengthAxis::X, &child_state).unwrap_or(0.0);
+            advance += measure_text_tree_advance(
+                child,
+                pixmap,
+                &child_state,
+                styles,
+                ancestors,
+                font_system,
+                swash_cache,
+                child_dom,
+            );
+        }
+    }
+    ancestors.pop();
+    advance
 }
 
 fn has_text_position_lists(node: &SvgNode) -> bool {
     ["x", "y", "dx", "dy"].iter().any(|name| {
-        node.attr_ascii_case_insensitive(name)
-            .is_some_and(|value| svg_text_length_list(value).len() > 1)
+        node.attr_ascii_case_insensitive(name).is_some_and(|value| {
+            value
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .filter_map(number)
+                .nth(1)
+                .is_some()
+        })
     })
 }
 
@@ -1119,41 +1332,31 @@ fn paint_positioned_text_onto(
     pixmap: &mut Pixmap,
     state: &PaintState,
     transform: Transform,
-    node: &SvgNode,
+    positions: &mut [TextPositions],
     text: &str,
     cursor: &mut TextCursor,
     font_system: &mut cosmic_text::FontSystem,
     swash_cache: &mut cosmic_text::SwashCache,
 ) -> f32 {
     let text = svg_directional_text(text, state.direction);
-    let xs = node
-        .attr_ascii_case_insensitive("x")
-        .map(svg_text_length_list)
-        .unwrap_or_default();
-    let ys = node
-        .attr_ascii_case_insensitive("y")
-        .map(svg_text_length_list)
-        .unwrap_or_default();
-    let dxs = node
-        .attr_ascii_case_insensitive("dx")
-        .map(svg_text_length_list)
-        .unwrap_or_default();
-    let dys = node
-        .attr_ascii_case_insensitive("dy")
-        .map(svg_text_length_list)
-        .unwrap_or_default();
     let mut paint_state = state.clone();
     paint_state.text_align = TextAlign::Start;
     let mut total = 0.0;
-    for (i, ch) in text.chars().enumerate() {
-        if let Some(x) = xs.get(i).copied() {
+    for ch in text.chars() {
+        let resolved = [0, 1, 2, 3].map(|axis| {
+            positions
+                .iter()
+                .rev()
+                .find_map(|frame| frame.lists[axis].get(frame.index).copied())
+        });
+        if let Some(x) = resolved[0] {
             cursor.x = x;
         }
-        if let Some(y) = ys.get(i).copied() {
+        if let Some(y) = resolved[1] {
             cursor.y = y;
         }
-        cursor.x += dxs.get(i).copied().unwrap_or(0.0);
-        cursor.y += dys.get(i).copied().unwrap_or(0.0);
+        cursor.x += resolved[2].unwrap_or(0.0);
+        cursor.y += resolved[3].unwrap_or(0.0);
         let s = ch.to_string();
         let advance = paint_text_onto(
             pixmap,
@@ -1169,6 +1372,9 @@ fn paint_positioned_text_onto(
         );
         cursor.x += advance;
         total += advance;
+        for frame in positions.iter_mut() {
+            frame.index += 1;
+        }
     }
     total
 }
@@ -1206,12 +1412,13 @@ fn paint_text_path(
     let Some(path) = parse_path_data(data) else {
         return 0.0;
     };
-    let samples = flatten_path_points(&path);
+    let samples = measure_path(&path);
+    let single_closed_subpath = text_path_is_single_closed(&path);
     let side_right = node
         .attr_ascii_case_insensitive("side")
         .is_some_and(|value| value.trim().eq_ignore_ascii_case("right"));
-    let total_len = path_polyline_length(&samples);
-    if samples.len() < 2 || total_len <= 0.0 {
+    let total_len = samples.length();
+    if total_len <= 0.0 {
         return 0.0;
     }
 
@@ -1246,12 +1453,22 @@ fn paint_text_path(
         0.0
     };
     let total_letter_spacing = state.letter_spacing + extra_letter_spacing;
-    let mut distance = start_offset;
-    distance += match state.text_align {
-        TextAlign::Center => -natural_advance / 2.0,
-        TextAlign::End | TextAlign::Right => -natural_advance,
+    let direction = if single_closed_subpath && matches!(state.direction, Direction::RTL) {
+        -1.0
+    } else {
+        1.0
+    };
+    let anchored_advance = if single_closed_subpath {
+        scaled_target_length.unwrap_or(natural_advance)
+    } else {
+        natural_advance
+    };
+    let anchor_shift = match state.text_align {
+        TextAlign::Center => -direction * anchored_advance / 2.0,
+        TextAlign::End | TextAlign::Right => -direction * anchored_advance,
         TextAlign::Start | TextAlign::Left => 0.0,
     };
+    let mut distance = start_offset + anchor_shift;
     let mut unscaled_distance = 0.0f32;
 
     for ch in text.chars() {
@@ -1263,11 +1480,26 @@ fn paint_text_path(
             } else {
                 1.0
             };
-            start_offset + (unscaled_distance + char_advance / 2.0) * scale
+            start_offset
+                + if single_closed_subpath {
+                    anchor_shift
+                } else {
+                    0.0
+                }
+                + direction * (unscaled_distance + char_advance / 2.0) * scale
         } else {
-            distance + char_advance / 2.0
+            distance + direction * char_advance / 2.0
         };
-        if let Some((mut x, mut y, angle)) = point_at_path_distance(&samples, mid) {
+        let point = text_path_glyph_distance(
+            mid,
+            start_offset,
+            total_len,
+            single_closed_subpath,
+            state.text_align,
+            state.direction,
+        )
+        .and_then(|distance| samples.point_at_distance(distance));
+        if let Some((mut x, mut y, angle)) = point {
             if side_right {
                 let offset = state.font_size.max(1.0);
                 x += -angle.sin() * offset;
@@ -1292,15 +1524,58 @@ fn paint_text_path(
         }
         unscaled_distance += char_advance;
         if scaled_target_length.is_none() {
-            distance += char_advance + total_letter_spacing;
+            distance += direction * (char_advance + total_letter_spacing);
             if ch.is_whitespace() {
-                distance += state.word_spacing;
+                distance += direction * state.word_spacing;
             }
         } else if ch.is_whitespace() {
             unscaled_distance += state.word_spacing;
         }
     }
     natural_advance
+}
+
+fn text_path_is_single_closed(path: &tiny_skia::Path) -> bool {
+    let mut subpaths = 0;
+    let mut ends_with_close = false;
+    for segment in path.segments() {
+        if matches!(segment, tiny_skia::PathSegment::MoveTo(_)) {
+            subpaths += 1;
+        }
+        ends_with_close = matches!(segment, tiny_skia::PathSegment::Close);
+    }
+    subpaths == 1 && ends_with_close
+}
+
+fn text_path_glyph_distance(
+    mid: f32,
+    offset: f32,
+    length: f32,
+    single_closed: bool,
+    anchor: TextAlign,
+    direction: Direction,
+) -> Option<f32> {
+    if !mid.is_finite() || !offset.is_finite() || !length.is_finite() || length <= 0.0 {
+        return None;
+    }
+    if !single_closed {
+        return (0.0..=length).contains(&mid).then_some(mid);
+    }
+    // SVG text positioning: enforce one circuit relative to startOffset before wrapping.
+    let relative = (mid - offset)
+        * if matches!(direction, Direction::RTL) {
+            -1.0
+        } else {
+            1.0
+        };
+    let (minimum, maximum) = match anchor {
+        TextAlign::Center => (-length / 2.0, length / 2.0),
+        TextAlign::End | TextAlign::Right => (-length, 0.0),
+        TextAlign::Start | TextAlign::Left => (0.0, length),
+    };
+    (minimum..=maximum)
+        .contains(&relative)
+        .then(|| mid.rem_euclid(length))
 }
 
 fn collect_svg_text(node: &SvgNode) -> String {
@@ -1313,13 +1588,19 @@ fn collect_svg_text(node: &SvgNode) -> String {
 }
 
 fn collect_svg_text_raw(node: &SvgNode) -> String {
-    let mut text = node.text.clone();
-    for child in &node.children {
-        if matches!(
-            child.kind,
-            SvgElementKind::Text | SvgElementKind::Tspan | SvgElementKind::TextPath
-        ) {
-            text.push_str(&collect_svg_text_raw(child));
+    let mut text = String::new();
+    for part in node.content() {
+        match part {
+            SvgContent::Text(run) => text.push_str(run),
+            SvgContent::Element(_, child)
+                if matches!(
+                    child.kind,
+                    SvgElementKind::Text | SvgElementKind::Tspan | SvgElementKind::TextPath
+                ) =>
+            {
+                text.push_str(&collect_svg_text_raw(child))
+            }
+            _ => {}
         }
     }
     text
@@ -1591,9 +1872,11 @@ fn foreign_object_has_animation(node: &SvgNode) -> bool {
 
 fn foreign_object_html_fragment(node: &SvgNode) -> String {
     let mut out = String::new();
-    out.push_str(&escape_html_text(&node.text));
-    for child in &node.children {
-        serialize_svg_subtree_as_markup(child, &mut out);
+    for part in node.content() {
+        match part {
+            SvgContent::Text(text) => out.push_str(&escape_html_text(text)),
+            SvgContent::Element(_, child) => serialize_svg_subtree_as_markup(child, &mut out),
+        }
     }
     out
 }
@@ -1614,9 +1897,11 @@ fn serialize_svg_subtree_as_markup(node: &SvgNode, out: &mut String) {
         out.push('"');
     }
     out.push('>');
-    out.push_str(&escape_html_text(&node.text));
-    for child in &node.children {
-        serialize_svg_subtree_as_markup(child, out);
+    for part in node.content() {
+        match part {
+            SvgContent::Text(text) => out.push_str(&escape_html_text(text)),
+            SvgContent::Element(_, child) => serialize_svg_subtree_as_markup(child, out),
+        }
     }
     out.push_str("</");
     out.push_str(tag);
@@ -1750,6 +2035,9 @@ fn paint_use<'a>(
                 })
                 .unwrap_or(transform);
             for child in &target.children {
+                if symbol_state.remaining_nodes.get() == 0 {
+                    break;
+                }
                 paint_node(
                     child,
                     pixmap,
@@ -2100,7 +2388,7 @@ fn svg_mask_for_node<'a>(
     stack: &mut Vec<String>,
     parent: Option<&Mask>,
 ) -> Option<Mask> {
-    let id = node.attr("mask").and_then(parse_url_id)?;
+    let id = state.mask.as_deref().and_then(parse_url_id)?;
     if stack.iter().any(|seen| seen == id) {
         return None;
     }
@@ -2111,6 +2399,7 @@ fn svg_mask_for_node<'a>(
     let mut mask_pixmap = Pixmap::new(width, height)?;
     ancestors.push(mask_node);
     let mut mask_state = state_for_node(mask_node, PaintState::default(), styles, ancestors, None);
+    mask_state.remaining_nodes = state.remaining_nodes.clone();
     let mask_transform = if mask_node
         .attr("maskContentUnits")
         .is_some_and(|value| value == "objectBoundingBox")
@@ -2234,6 +2523,8 @@ fn state_for_node(
     ancestors: &[&SvgNode],
     dom_node: Option<&WebCore>,
 ) -> PaintState {
+    // Masks composite the element/group, rather than inheriting onto its children.
+    state.mask = None;
     let mut own_fill = false;
     let mut own_stroke = false;
     for attr in &node.attributes {
@@ -2306,7 +2597,9 @@ fn apply_dom_computed_style(
     state.visible = state.visible && style.visibility;
     state.current_color = style.color;
     if specified_svg_paint & SPECIFIED_SVG_FILL != 0 {
-        if let Some(fill) = style.svg_fill {
+        if let Some(paint) = &style.rare().svg_fill_paint {
+            state.fill = parse_svg_paint(paint, style.color, &style.custom_props);
+        } else if let Some(fill) = style.svg_fill {
             state.fill = Some(PaintSource::Color(fill));
         } else {
             state.fill = None;
@@ -2315,7 +2608,9 @@ fn apply_dom_computed_style(
         state.fill = None;
     }
     if specified_svg_paint & SPECIFIED_SVG_STROKE != 0 {
-        if let Some(stroke) = style.svg_stroke {
+        if let Some(paint) = &style.rare().svg_stroke_paint {
+            state.stroke = parse_svg_paint(paint, style.color, &style.custom_props);
+        } else if let Some(stroke) = style.svg_stroke {
             state.stroke = Some(PaintSource::Color(stroke));
         } else {
             state.stroke = None;
@@ -2793,6 +3088,7 @@ fn apply_paint_attr(state: &mut PaintState, name: &str, value: &str) {
             state.fill = parse_svg_paint(value, state.current_color, &state.custom_props);
         }
         "stroke" => state.stroke = parse_svg_paint(value, state.current_color, &state.custom_props),
+        "mask" => state.mask = Some(resolve_var_references(value, &state.custom_props)),
         "color" => {
             if let Some(color) = parse_svg_color(value, &state.custom_props) {
                 state.current_color = color;
@@ -3302,7 +3598,7 @@ fn source_alpha_pixmap(source: &Pixmap) -> Pixmap {
         Pixmap::new(source.width(), source.height()).expect("source dimensions are valid");
     for (dst, src) in alpha.pixels_mut().iter_mut().zip(source.pixels()) {
         let a = src.alpha();
-        *dst = PremultipliedColorU8::from_rgba(a, a, a, a).unwrap();
+        *dst = PremultipliedColorU8::from_rgba(0, 0, 0, a).unwrap();
     }
     alpha
 }
@@ -3456,17 +3752,46 @@ fn filter_channel(px: PremultipliedColorU8, channel: &str) -> f32 {
 fn component_transfer_filter_pixmap(input: &Pixmap, node: &SvgNode) -> Pixmap {
     let funcs = component_transfer_funcs(node);
     let mut out = Pixmap::new(input.width(), input.height()).expect("filter dimensions are valid");
-    for (dst, src) in out.pixels_mut().iter_mut().zip(input.pixels()) {
-        let (r, g, b, a) = pixel_unpremul_rgba(*src);
-        let channel = |value: u8, func: Option<&ComponentTransferFunc>| -> f32 {
+    #[cfg(test)]
+    let scalar_reference = tests::COMPONENT_TRANSFER_SCALAR_REFERENCE.get();
+    #[cfg(not(test))]
+    let scalar_reference = false;
+    if input.pixels().len() <= 256 || scalar_reference {
+        for (dst, src) in out.pixels_mut().iter_mut().zip(input.pixels()) {
+            let (r, g, b, a) = pixel_unpremul_rgba(*src);
+            let channel = |value: u8, func: Option<&ComponentTransferFunc>| -> f32 {
+                let value = value as f32 / 255.0;
+                func.map(|func| func.apply(value)).unwrap_or(value)
+            };
+            *dst = premul_from_unit_rgba(
+                channel(r, funcs.r.as_ref()),
+                channel(g, funcs.g.as_ref()),
+                channel(b, funcs.b.as_ref()),
+                channel(a, funcs.a.as_ref()),
+            );
+        }
+        return out;
+    }
+    // Preserve fractional values until final alpha-dependent premultiplication.
+    let tables: [[f32; 256]; 4] = [
+        funcs.r.as_ref(),
+        funcs.g.as_ref(),
+        funcs.b.as_ref(),
+        funcs.a.as_ref(),
+    ]
+    .map(|func| {
+        std::array::from_fn(|value| {
             let value = value as f32 / 255.0;
             func.map(|func| func.apply(value)).unwrap_or(value)
-        };
+        })
+    });
+    for (dst, src) in out.pixels_mut().iter_mut().zip(input.pixels()) {
+        let (r, g, b, a) = pixel_unpremul_rgba(*src);
         *dst = premul_from_unit_rgba(
-            channel(r, funcs.r.as_ref()),
-            channel(g, funcs.g.as_ref()),
-            channel(b, funcs.b.as_ref()),
-            channel(a, funcs.a.as_ref()),
+            tables[0][usize::from(r)],
+            tables[1][usize::from(g)],
+            tables[2][usize::from(b)],
+            tables[3][usize::from(a)],
         );
     }
     out
@@ -3682,44 +4007,18 @@ fn morphology_filter_pixmap(input: &Pixmap, node: &SvgNode, state: &PaintState) 
         .map(|value| svg_filter_radius_list(value, state))
         .filter(|values| !values.is_empty())
         .unwrap_or_else(|| vec![0.0]);
+    if radii[0] <= 0.0 || radii.get(1).copied().unwrap_or(radii[0]) <= 0.0 {
+        return input.to_owned();
+    }
     let rx = radii[0].max(0.0).round() as i32;
     let ry = radii.get(1).copied().unwrap_or(radii[0]).max(0.0).round() as i32;
     if rx == 0 && ry == 0 {
         return input.to_owned();
     }
-    let dilate = !node
+    let dilate = node
         .attr("operator")
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("erode"));
-    let mut out = Pixmap::new(input.width(), input.height()).expect("filter dimensions are valid");
-    let width = input.width() as i32;
-    let height = input.height() as i32;
-    for y in 0..height {
-        for x in 0..width {
-            let mut r = if dilate { 0u8 } else { 255u8 };
-            let mut g = r;
-            let mut b = r;
-            let mut a = r;
-            for sy in (y - ry).max(0)..=(y + ry).min(height - 1) {
-                for sx in (x - rx).max(0)..=(x + rx).min(width - 1) {
-                    let px = input.pixel(sx as u32, sy as u32).unwrap();
-                    if dilate {
-                        r = r.max(px.red());
-                        g = g.max(px.green());
-                        b = b.max(px.blue());
-                        a = a.max(px.alpha());
-                    } else {
-                        r = r.min(px.red());
-                        g = g.min(px.green());
-                        b = b.min(px.blue());
-                        a = a.min(px.alpha());
-                    }
-                }
-            }
-            let index = (y as u32 * input.width() + x as u32) as usize;
-            out.pixels_mut()[index] = premul_channels_to_pixel(r, g, b, a);
-        }
-    }
-    out
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("dilate"));
+    super::morphology::filter_pixmap(input, rx as usize, ry as usize, dilate)
 }
 
 fn svg_filter_radius_list(value: &str, state: &PaintState) -> Vec<f32> {
@@ -4226,10 +4525,10 @@ fn with_paint_source<'a>(
                 {
                     let Some(src) = PixmapRef::from_bytes(tile.data(), tile.width(), tile.height())
                     else {
-                        paint.set_color(
-                            apply_opacity(fallback.unwrap_or(Color::BLACK), state.opacity)
-                                .to_tiny_skia(),
-                        );
+                        let Some(color) = fallback else {
+                            return;
+                        };
+                        paint.set_color(apply_opacity(*color, state.opacity).to_tiny_skia());
                         draw(&paint);
                         return;
                     };
@@ -4242,22 +4541,23 @@ fn with_paint_source<'a>(
                     );
                     draw(&paint);
                 } else {
-                    paint.set_color(
-                        apply_opacity(fallback.unwrap_or(Color::BLACK), state.opacity)
-                            .to_tiny_skia(),
-                    );
+                    let Some(color) = fallback else {
+                        return;
+                    };
+                    paint.set_color(apply_opacity(*color, state.opacity).to_tiny_skia());
                     draw(&paint);
                 }
             } else if let Some(shader) = ids
                 .get(id)
-                .and_then(|node| gradient_shader(node, state.opacity, path, ids, styles, ancestors))
+                .and_then(|node| gradient_shader(node, state, path, ids, styles, ancestors))
             {
                 paint.shader = shader;
                 draw(&paint);
             } else {
-                paint.set_color(
-                    apply_opacity(fallback.unwrap_or(Color::BLACK), state.opacity).to_tiny_skia(),
-                );
+                let Some(color) = fallback else {
+                    return;
+                };
+                paint.set_color(apply_opacity(*color, state.opacity).to_tiny_skia());
                 draw(&paint);
             }
         }
@@ -4369,7 +4669,7 @@ fn pattern_transform(pattern: &SvgNode, state: &PaintState, path: &Path) -> Tran
 
 fn gradient_shader<'a>(
     node: &'a SvgNode,
-    opacity: f32,
+    state: &PaintState,
     path: &Path,
     ids: &HashMap<String, &'a SvgNode>,
     styles: &[CssRule],
@@ -4377,10 +4677,10 @@ fn gradient_shader<'a>(
 ) -> Option<tiny_skia::Shader<'static>> {
     match node.kind {
         SvgElementKind::LinearGradient => {
-            linear_gradient_shader(node, opacity, path, ids, styles, ancestors)
+            linear_gradient_shader(node, state, path, ids, styles, ancestors)
         }
         SvgElementKind::RadialGradient => {
-            radial_gradient_shader(node, opacity, path, ids, styles, ancestors)
+            radial_gradient_shader(node, state, path, ids, styles, ancestors)
         }
         _ => None,
     }
@@ -4388,7 +4688,7 @@ fn gradient_shader<'a>(
 
 fn linear_gradient_shader<'a>(
     node: &'a SvgNode,
-    opacity: f32,
+    state: &PaintState,
     path: &Path,
     ids: &HashMap<String, &'a SvgNode>,
     styles: &[CssRule],
@@ -4436,7 +4736,7 @@ fn linear_gradient_shader<'a>(
     LinearGradient::new(
         SkPoint::from_xy(x1, y1),
         SkPoint::from_xy(x2, y2),
-        gradient_stops(node, opacity, ids, styles, ancestors),
+        gradient_stops(node, state, ids, styles, ancestors),
         gradient_spread(node, ids),
         gradient_transform(node, ids),
     )
@@ -4444,7 +4744,7 @@ fn linear_gradient_shader<'a>(
 
 fn radial_gradient_shader<'a>(
     node: &'a SvgNode,
-    opacity: f32,
+    state: &PaintState,
     path: &Path,
     ids: &HashMap<String, &'a SvgNode>,
     styles: &[CssRule],
@@ -4502,7 +4802,7 @@ fn radial_gradient_shader<'a>(
         0.0,
         SkPoint::from_xy(cx, cy),
         r.max(0.0),
-        gradient_stops(node, opacity, ids, styles, ancestors),
+        gradient_stops(node, state, ids, styles, ancestors),
         gradient_spread(node, ids),
         gradient_transform(node, ids),
     )
@@ -4569,7 +4869,7 @@ fn percent_or_number(value: &str) -> Option<f32> {
 
 fn gradient_stops<'a>(
     node: &'a SvgNode,
-    opacity: f32,
+    state: &PaintState,
     ids: &HashMap<String, &'a SvgNode>,
     styles: &[CssRule],
     ancestors: &mut Vec<&'a SvgNode>,
@@ -4577,7 +4877,7 @@ fn gradient_stops<'a>(
     let mut stops = Vec::new();
     collect_gradient_stops(
         node,
-        opacity,
+        state,
         ids,
         styles,
         ancestors,
@@ -4589,15 +4889,21 @@ fn gradient_stops<'a>(
 
 fn collect_gradient_stops<'a>(
     node: &'a SvgNode,
-    opacity: f32,
+    state: &PaintState,
     ids: &HashMap<String, &'a SvgNode>,
     styles: &[CssRule],
     ancestors: &mut Vec<&'a SvgNode>,
     stops: &mut Vec<SkGradientStop>,
     stack: &mut Vec<String>,
 ) {
+    if stack.len() >= 64 {
+        return;
+    }
     ancestors.push(node);
-    let gradient_state = state_for_node(node, PaintState::default(), styles, ancestors, None);
+    let mut inherited = PaintState::default();
+    inherited.custom_props = state.custom_props.clone();
+    inherited.current_color = state.current_color;
+    let gradient_state = state_for_node(node, inherited, styles, ancestors, None);
     for child in &node.children {
         if svg_tag_name(child).eq_ignore_ascii_case("stop") {
             let offset = percent_or_number(child.attr("offset").unwrap_or("0")).unwrap_or(0.0);
@@ -4605,7 +4911,7 @@ fn collect_gradient_stops<'a>(
             let color = with_alpha(stop_state.stop_color, stop_state.stop_opacity);
             stops.push(SkGradientStop::new(
                 offset,
-                apply_opacity(color, opacity).to_tiny_skia(),
+                apply_opacity(color, state.opacity).to_tiny_skia(),
             ));
         }
     }
@@ -4626,22 +4932,29 @@ fn collect_gradient_stops<'a>(
         return;
     };
     stack.push(id.to_string());
-    collect_gradient_stops(parent, opacity, ids, styles, ancestors, stops, stack);
+    collect_gradient_stops(parent, state, ids, styles, ancestors, stops, stack);
     stack.pop();
     ancestors.pop();
 }
 
-fn inherited_gradient_attr(
-    node: &SvgNode,
+fn inherited_gradient_attr<'a>(
+    mut node: &'a SvgNode,
     name: &str,
-    ids: &HashMap<String, &SvgNode>,
+    ids: &HashMap<String, &'a SvgNode>,
 ) -> Option<String> {
-    if let Some(value) = node.attr(name) {
-        return Some(value.to_string());
+    let mut seen = Vec::new();
+    for _ in 0..64 {
+        if let Some(value) = node.attr(name) {
+            return Some(value.to_string());
+        }
+        let id = href_id(node)?;
+        if seen.contains(&id) {
+            return None;
+        }
+        seen.push(id);
+        node = ids.get(id).copied()?;
     }
-    let id = href_id(node)?;
-    ids.get(id)
-        .and_then(|parent| inherited_gradient_attr(parent, name, ids))
+    None
 }
 
 fn href_id(node: &SvgNode) -> Option<&str> {
@@ -4906,6 +5219,143 @@ fn points_path_from_pairs(points: &[(f32, f32)], close: bool) -> Option<Path> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_rasterizer_bounds_acyclic_use_reference_depth() {
+        for (depth, visible) in [(8, true), (2_000, false)] {
+            let mut source = String::from("<svg width='1' height='1'><defs>");
+            for index in 0..depth {
+                source.push_str(&format!(
+                    "<g id='n{index}'><use href='#n{}'/></g>",
+                    index + 1
+                ));
+            }
+            source.push_str(&format!("<rect id='n{depth}' width='1' height='1' fill='red'/></defs><use href='#n0'/></svg>"));
+            let pixels = rasterize_svg_to_rgba(&source, 1, 1).unwrap();
+            assert_eq!(pixels[3] > 0, visible, "reference depth={depth}");
+        }
+    }
+
+    #[test]
+    fn native_rasterizer_shares_use_work_budget_and_resets_each_raster() {
+        let mut source = String::from(
+            "<svg width='1' height='1'><defs><rect id='n0' width='1' height='1' fill='red'/>",
+        );
+        for index in 1..24 {
+            source.push_str(&format!(
+                "<g id='n{index}'><use href='#n{}'/><use href='#n{}'/></g>",
+                index - 1,
+                index - 1
+            ));
+        }
+        source.push_str("</defs><use href='#n23'/></svg>");
+        let doc = parse_svg_document(&source).unwrap();
+        let mut ids = HashMap::new();
+        collect_id_nodes(&doc.root, &mut ids);
+        for masked in [false, true] {
+            let mut state = PaintState::default();
+            state.viewport_width = 1.0;
+            state.viewport_height = 1.0;
+            state.remaining_nodes.set(128);
+            if masked {
+                // A mask gets independent styling but must retain the caller's work budget.
+                let mask_doc = parse_svg_document(
+                    "<svg><mask id='m'><use href='#n23'/></mask><rect width='1' height='1'/></svg>",
+                )
+                .unwrap();
+                let mut mask_ids = ids.clone();
+                collect_id_nodes(&mask_doc.root, &mut mask_ids);
+                state.mask = Some("url(#m)".into());
+                svg_mask_for_node(
+                    &mask_doc.root.children[1],
+                    &state,
+                    1,
+                    1,
+                    Transform::identity(),
+                    &mask_ids,
+                    &[],
+                    &mut Vec::new(),
+                    &mut Vec::new(),
+                    None,
+                );
+                assert_eq!(state.remaining_nodes.get(), 0);
+            } else {
+                let mut pixmap = Pixmap::new(1, 1).unwrap();
+                paint_node(
+                    &doc.root,
+                    &mut pixmap,
+                    state.clone(),
+                    Transform::identity(),
+                    &ids,
+                    &[],
+                    &mut Vec::new(),
+                    &mut Vec::new(),
+                    None,
+                    true,
+                    None,
+                );
+                assert_eq!(state.remaining_nodes.get(), 0);
+                assert!(pixmap.data()[3] > 0);
+            }
+        }
+        let first = rasterize_svg_to_rgba(&source, 1, 1).unwrap();
+        assert!(first[3] > 0);
+        assert_eq!(rasterize_svg_to_rgba(&source, 1, 1).unwrap(), first);
+    }
+
+    #[test]
+    fn gradient_inheritance_bounds_cycles_and_long_acyclic_chains() {
+        let doc = parse_svg_document(
+            "<svg><linearGradient id='a' href='#b'/><linearGradient id='b' href='#a'/></svg>",
+        )
+        .unwrap();
+        let mut ids = HashMap::new();
+        collect_id_nodes(&doc.root, &mut ids);
+        assert_eq!(
+            inherited_gradient_attr(&doc.root.children[0], "x1", &ids),
+            None
+        );
+        let mut source = String::from("<svg>");
+        for index in 0..2_000 {
+            source.push_str(&format!(
+                "<linearGradient id='g{index}' href='#g{}'/>",
+                index + 1
+            ));
+        }
+        source.push_str("<linearGradient id='g2000' x1='25%'><stop offset='0' stop-color='red'/></linearGradient></svg>");
+        let doc = parse_svg_document(&source).unwrap();
+        let mut ids = HashMap::new();
+        collect_id_nodes(&doc.root, &mut ids);
+        assert_eq!(
+            inherited_gradient_attr(&doc.root.children[0], "x1", &ids),
+            None
+        );
+        assert_eq!(
+            inherited_gradient_attr(&doc.root.children[1_999], "x1", &ids),
+            Some("25%".into())
+        );
+        assert!(
+            gradient_stops(
+                &doc.root.children[0],
+                &PaintState::default(),
+                &ids,
+                &[],
+                &mut Vec::new()
+            )
+            .is_empty()
+        );
+        assert_eq!(
+            gradient_stops(
+                &doc.root.children[1_999],
+                &PaintState::default(),
+                &ids,
+                &[],
+                &mut Vec::new()
+            )
+            .len(),
+            1
+        );
+    }
 
     #[test]
     fn intrinsic_raster_matches_explicit_size_for_fractional_dimensions() {
@@ -5176,6 +5626,169 @@ mod tests {
     }
 
     #[test]
+    fn inline_dom_preserves_masked_gradient_paint() {
+        let mut renderer = crate::Renderer::new();
+        let mut doc = renderer.load_html_vp(
+            r##"<style>
+            body { margin:0; background:white; --accent:#21a839 }
+            svg { display:block }
+            </style><svg width="20" height="10"><defs>
+            <linearGradient id="g"><stop stop-color="var(--accent)"/>
+            <stop offset="1" stop-color="var(--accent)"/></linearGradient>
+            <mask id="m"><rect width="10" height="10" fill="white"/></mask>
+            </defs><rect width="20" height="10" style="fill:url(#g);mask:url(#m)"/>
+            </svg>"##,
+            20.0,
+            10.0,
+        );
+        let mut pixmap = Pixmap::new(20, 10).unwrap();
+        renderer.render(&mut doc, &mut pixmap, 1.0);
+        let left = pixmap.pixel(5, 5).unwrap();
+        assert!(
+            left.green() > 140 && left.red() < 80 && left.blue() < 90,
+            "DOM gradient pixel was {left:?}"
+        );
+        assert_eq!(
+            pixmap.pixel(15, 5).unwrap(),
+            PremultipliedColorU8::from_rgba(255, 255, 255, 255).unwrap()
+        );
+    }
+
+    #[test]
+    fn native_rasterizer_masks_gradient_sparkline_with_inherited_variables() {
+        let source = r##"<svg width="155" height="30"><defs>
+            <linearGradient id="g" x1="0" x2="0" y1="1" y2="0">
+              <stop offset="0%" stop-color="var(--low)"/>
+              <stop offset="50%" stop-color="var(--high)"/>
+            </linearGradient>
+            <mask id="m" x="0" y="0" width="155" height="28">
+              <polyline transform="translate(0,28) scale(1,-1)"
+                points="0,1 30,2 60,19 90,11 120,8 153,12"
+                fill="transparent" stroke="#8cc665" stroke-width="2"/>
+            </mask></defs><g transform="translate(0,-2)">
+            <rect y="-2" width="155" height="30"
+              style="stroke:none;fill:url(#g);mask:url(#m)"/>
+            </g></svg>"##;
+        let props = HashMap::from([
+            ("--low".into(), "#9be9a8".into()),
+            ("--high".into(), "#216e39".into()),
+        ]);
+        let doc = parse_svg_document(source).unwrap();
+        let data = rasterize_svg_document_to_rgba_with_vars(
+            &doc,
+            155,
+            30,
+            (155.0, 30.0),
+            Color::BLACK,
+            None,
+            None,
+            &props,
+        )
+        .unwrap();
+        let painted: Vec<_> = data.chunks_exact(4).filter(|pixel| pixel[3] > 0).collect();
+        assert!(painted.len() > 100, "sparkline must remain visible");
+        assert!(
+            painted.len() < 1000,
+            "mask must not paint a solid rectangle"
+        );
+        assert!(
+            painted
+                .iter()
+                .all(|pixel| pixel[1] > pixel[0] && pixel[1] > pixel[2]),
+            "gradient must resolve inherited green colors, not default black"
+        );
+        let attributes = source.replace(
+            "style=\"stroke:none;fill:url(#g);mask:url(#m)\"",
+            "stroke=\"none\" fill=\"url(#g)\" mask=\"url(#m)\"",
+        );
+        let doc = parse_svg_document(&attributes).unwrap();
+        let equivalent = rasterize_svg_document_to_rgba_with_vars(
+            &doc,
+            155,
+            30,
+            (155.0, 30.0),
+            Color::BLACK,
+            None,
+            None,
+            &props,
+        )
+        .unwrap();
+        assert_eq!(data, equivalent);
+    }
+
+    #[test]
+    fn native_rasterizer_source_alpha_has_black_rgb_and_preserves_alpha() {
+        let mut input = Pixmap::new(256, 1).unwrap();
+        for (alpha, pixel) in input.pixels_mut().iter_mut().enumerate() {
+            *pixel = PremultipliedColorU8::from_rgba(alpha as u8, 0, 0, alpha as u8).unwrap();
+        }
+        let source_alpha = source_alpha_pixmap(&input);
+        for (alpha, pixel) in source_alpha.pixels().iter().enumerate() {
+            assert_eq!(
+                *pixel,
+                PremultipliedColorU8::from_rgba(0, 0, 0, alpha as u8).unwrap()
+            );
+        }
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="10" height="10">
+            <defs><filter id="f"><feOffset in="SourceAlpha"/></filter></defs>
+            <rect width="10" height="10" fill="red" filter="url(#f)"/></svg>"##,
+            10,
+            10,
+        )
+        .unwrap();
+        assert_eq!(rgba_at(&data, 10, 5, 5), (0, 0, 0, 255));
+    }
+
+    #[test]
+    fn native_rasterizer_morphology_defaults_to_erode_not_dilate() {
+        let mut input = Pixmap::new(5, 5).unwrap();
+        for y in 1..4 {
+            for x in 1..4 {
+                input.pixels_mut()[y * 5 + x] =
+                    PremultipliedColorU8::from_rgba(255, 255, 255, 255).unwrap();
+            }
+        }
+        let render = |operator| {
+            let source = format!("<svg><feMorphology radius='1' {operator}/></svg>");
+            let doc = parse_svg_document(&source).unwrap();
+            morphology_filter_pixmap(&input, &doc.root.children[0], &PaintState::default())
+        };
+        let default = render("");
+        assert_eq!(default.data(), render("operator='erode'").data());
+        assert_eq!(default.pixel(2, 2).unwrap().alpha(), 255);
+        assert_eq!(default.pixel(1, 1).unwrap().alpha(), 0);
+        assert_eq!(
+            render("operator='dilate'").pixel(0, 0).unwrap().alpha(),
+            255
+        );
+    }
+
+    #[test]
+    fn morphology_nonpositive_radius_on_either_axis_preserves_exact_input() {
+        let mut input = Pixmap::new(7, 5).unwrap();
+        for (index, pixel) in input.pixels_mut().iter_mut().enumerate() {
+            let alpha = (index * 47 % 256) as u8;
+            *pixel =
+                PremultipliedColorU8::from_rgba(alpha / 2, alpha / 3, alpha / 4, alpha).unwrap();
+        }
+        for radius in ["0 3", "3 0", "-1 3", "3 -1"] {
+            for operator in ["erode", "dilate"] {
+                let source =
+                    format!("<svg><feMorphology radius='{radius}' operator='{operator}'/></svg>");
+                let doc = parse_svg_document(&source).unwrap();
+                let result =
+                    morphology_filter_pixmap(&input, &doc.root.children[0], &PaintState::default());
+                assert_eq!(
+                    result.data(),
+                    input.data(),
+                    "radius={radius} operator={operator}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn native_rasterizer_resolves_linear_gradient_paint() {
         let data = rasterize_svg_to_rgba(
             r##"<svg width="20" height="10"><defs><linearGradient id="g"><stop offset="0%" stop-color="red"/><stop offset="100%" stop-color="blue"/></linearGradient></defs><rect width="20" height="10" fill="url(#g)"/></svg>"##,
@@ -5294,6 +5907,101 @@ mod tests {
     }
 
     #[test]
+    fn mixed_text_collection_and_foreign_object_serialization_preserve_order() {
+        let doc = parse_svg_document(
+            r#"<svg><text>A<tspan>B<tspan>C</tspan>D</tspan>E</text><foreignObject>A<b>B</b>C<i>D</i>E</foreignObject></svg>"#,
+        ).unwrap();
+        assert_eq!(collect_svg_text_raw(&doc.root.children[0]), "ABCDE");
+        assert_eq!(
+            foreign_object_html_fragment(&doc.root.children[1]),
+            "A<b>B</b>C<i>D</i>E"
+        );
+        let changed =
+            parse_svg_document(r#"<svg><foreignObject>AC<b>B</b><i>D</i>E</foreignObject></svg>"#)
+                .unwrap();
+        assert_ne!(
+            foreign_object_html_fragment(&doc.root.children[1]),
+            foreign_object_html_fragment(&changed.root.children[0])
+        );
+    }
+
+    #[test]
+    fn native_rasterizer_keeps_position_indices_across_mixed_text_and_descendants() {
+        let render = |content: &str| {
+            rasterize_svg_to_rgba(&format!(
+            r#"<svg width="160" height="36"><text x="4 44 84 124" y="28" font-family="monospace" font-size="22" fill="black">{content}</text></svg>"#,
+        ), 160, 36).unwrap()
+        };
+        let flat = render("ABCD");
+        assert_eq!(render("A<tspan>B<tspan>C</tspan></tspan>D"), flat);
+        assert_eq!(render("<tspan>A</tspan>B<tspan>C</tspan>D"), flat);
+        let override_position = render(r#"A<tspan x="54">B</tspan>CD"#);
+        assert!(painted_in(&override_position, 160, 52, 8, 70, 30));
+        assert!(painted_in(&override_position, 160, 82, 8, 102, 30));
+        assert!(painted_in(&override_position, 160, 122, 8, 142, 30));
+    }
+
+    #[test]
+    fn native_rasterizer_keeps_mixed_text_length_adjustment_shared() {
+        let render = |content: &str| {
+            rasterize_svg_to_rgba(&format!(
+            r#"<svg width="160" height="36"><text x="4" y="28" textLength="90" font-family="monospace" font-size="22" fill="black">{content}</text></svg>"#,
+        ), 160, 36).unwrap()
+        };
+        let flat = painted_bounds(&render("ABC"), 160).unwrap();
+        let split = painted_bounds(&render("A<tspan/>B<tspan/>C"), 160).unwrap();
+        assert!(
+            flat.2.abs_diff(split.2) <= 1,
+            "flat={flat:?} split={split:?}"
+        );
+        assert!(
+            split.2 < 110,
+            "textLength must not restart per run: {split:?}"
+        );
+    }
+
+    #[test]
+    fn native_rasterizer_anchors_mixed_text_as_one_unpositioned_chunk() {
+        for anchor in ["start", "middle", "end"] {
+            let render = |content: &str| {
+                rasterize_svg_to_rgba(&format!(
+                r#"<svg width="200" height="36"><text x="100" y="28" text-anchor="{anchor}" font-family="monospace" font-size="22" fill="black">{content}</text></svg>"#,
+            ), 200, 36).unwrap()
+            };
+            let flat = painted_bounds(&render("AAAA"), 200).unwrap();
+            for content in ["AA<tspan/>AA", "A<tspan>AA</tspan>A"] {
+                let split = painted_bounds(&render(content), 200).unwrap();
+                assert!(
+                    flat.0.abs_diff(split.0) <= 1 && flat.2.abs_diff(split.2) <= 1,
+                    "anchor={anchor} content={content} flat={flat:?} split={split:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nested_position_list_does_not_repeat_already_applied_scalar_offset() {
+        let render = |body: &str| {
+            rasterize_svg_to_rgba(&format!(
+            r#"<svg width="100" height="64"><text font-family="monospace" font-size="22" fill="black">{body}</text></svg>"#,
+        ), 100, 64).unwrap()
+        };
+        let nested = render(r#"<tspan dx="5"><tspan y="24 54">AB</tspan></tspan>"#);
+        let reference = render(r#"<tspan x="5" y="24 54">AB</tspan>"#);
+        assert_eq!(nested, reference);
+    }
+
+    #[test]
+    fn text_path_collection_preserves_interleaved_span_order() {
+        let render = |content: &str| {
+            rasterize_svg_to_rgba(&format!(
+            r##"<svg width="160" height="36"><defs><path id="p" d="M4 28H154"/></defs><text font-family="monospace" font-size="22" fill="black"><textPath href="#p">{content}</textPath></text></svg>"##,
+        ), 160, 36).unwrap()
+        };
+        assert_eq!(render("A<tspan>B</tspan>C"), render("ABC"));
+    }
+
+    #[test]
     fn native_rasterizer_applies_tspan_baseline_shift() {
         let data = rasterize_svg_to_rgba(
             r#"<svg width="80" height="36"><text x="4" y="30" fill="black" font-size="20">A<tspan x="42" baseline-shift="-14">B</tspan></text></svg>"#,
@@ -5359,6 +6067,35 @@ mod tests {
         .unwrap();
         let (r, g, b, a) = rgba_at(&data, 10, 5, 5);
         assert!(r > 200 && g < 50 && b < 50 && a > 200);
+    }
+
+    #[test]
+    fn native_rasterizer_invalid_paint_servers_only_use_explicit_fallbacks() {
+        for reference in ["missing", "not-a-server"] {
+            for property in ["fill", "stroke"] {
+                for fallback in ["", " none", " red", " currentColor"] {
+                    let source = format!(
+                        r##"<svg width="10" height="10" color="red"><defs><rect id="not-a-server"/></defs><rect x="2" y="2" width="6" height="6" fill="none" stroke-width="2" style="{property}:url(#{reference}){fallback}"/></svg>"##
+                    );
+                    let data = rasterize_svg_to_rgba(&source, 10, 10).unwrap();
+                    if fallback.is_empty() || fallback == " none" {
+                        assert!(
+                            data.chunks_exact(4).all(|pixel| pixel[3] == 0),
+                            "unexpected paint: {property} {reference}{fallback}"
+                        );
+                    } else {
+                        let painted: Vec<_> =
+                            data.chunks_exact(4).filter(|pixel| pixel[3] != 0).collect();
+                        assert!(!painted.is_empty(), "missing fallback: {source}");
+                        assert!(
+                            painted.iter().all(|pixel| pixel[0] == pixel[3]
+                                && pixel[1] == 0
+                                && pixel[2] == 0)
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -5532,6 +6269,33 @@ mod tests {
     }
 
     #[test]
+    fn native_rasterizer_rotates_path_text_glyphs_to_the_tangent() {
+        for paint in [
+            "fill='black'",
+            "fill='none' stroke='black' stroke-width='1'",
+        ] {
+            let render = |path: &str| {
+                let svg = format!(
+                    "<svg width='200' height='200'><defs><path id='p' d='{path}'/></defs><text font-family='Arial' font-size='48' {paint}><textPath href='#p' startOffset='50'>F</textPath></text></svg>"
+                );
+                let pixels = rasterize_svg_to_rgba(&svg, 200, 200).unwrap();
+                let (left, top, right, bottom) = painted_bounds(&pixels, 200).unwrap();
+                ((right - left + 1) as f32, (bottom - top + 1) as f32)
+            };
+            let horizontal = render("M10 100 H190");
+            let vertical = render("M100 10 V190");
+            assert!(
+                horizontal.1 > horizontal.0 * 1.1,
+                "upright F bounds={horizontal:?}, {paint}"
+            );
+            assert!(
+                vertical.0 > vertical.1 * 1.1,
+                "vertical path must rotate F, bounds={vertical:?}, {paint}"
+            );
+        }
+    }
+
+    #[test]
     fn native_rasterizer_paints_text_path() {
         let data = rasterize_svg_to_rgba(
             r##"<svg width="120" height="40">
@@ -5544,6 +6308,125 @@ mod tests {
         .unwrap();
         assert!(painted_in(&data, 120, 15, 10, 75, 34));
         assert!(!painted_in(&data, 120, 15, 0, 75, 8));
+    }
+
+    #[test]
+    fn native_rasterizer_omits_open_text_path_off_path_midpoints() {
+        for offset in ["150%", "-150%"] {
+            let svg = format!(
+                r##"<svg width="160" height="40">
+                <defs><path id="baseline" d="M30 28 H130"/></defs>
+                <text fill="black" font-size="20"><textPath href="#baseline" startOffset="{offset}">II</textPath></text>
+            </svg>"##
+            );
+            let data = rasterize_svg_to_rgba(&svg, 160, 40).unwrap();
+            assert!(painted_bounds(&data, 160).is_none(), "offset={offset}");
+        }
+    }
+
+    #[test]
+    fn native_rasterizer_omits_only_overflowing_open_text_path_glyphs() {
+        let render = |text: &str| {
+            let svg = format!(
+                r##"<svg width="160" height="40">
+                <defs><path id="baseline" d="M30 28 H130"/></defs>
+                <text fill="black" font-size="20" font-family="monospace"><textPath href="#baseline" startOffset="90">{text}</textPath></text>
+            </svg>"##
+            );
+            rasterize_svg_to_rgba(&svg, 160, 40).unwrap()
+        };
+        let single = render("I");
+        assert!(painted_bounds(&single, 160).is_some());
+        assert_eq!(render("II"), single);
+    }
+
+    #[test]
+    fn text_path_closed_visibility_is_one_anchor_relative_circuit() {
+        for direction in [Direction::LTR, Direction::RTL] {
+            let sign = if matches!(direction, Direction::RTL) {
+                -1.0
+            } else {
+                1.0
+            };
+            for (anchor, low, high) in [
+                (TextAlign::Start, 0.0, 100.0),
+                (TextAlign::Center, -50.0, 50.0),
+                (TextAlign::End, -100.0, 0.0),
+            ] {
+                for offset in [-225.0, 75.0, 375.0] {
+                    for relative in [low, (low + high) / 2.0, high] {
+                        let mid = offset + sign * relative;
+                        assert_eq!(
+                            text_path_glyph_distance(mid, offset, 100.0, true, anchor, direction),
+                            Some(mid.rem_euclid(100.0))
+                        );
+                    }
+                    for relative in [low - 0.25, high + 0.25] {
+                        assert_eq!(
+                            text_path_glyph_distance(
+                                offset + sign * relative,
+                                offset,
+                                100.0,
+                                true,
+                                anchor,
+                                direction
+                            ),
+                            None
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn text_path_wrapping_requires_exactly_one_closed_subpath() {
+        for (data, expected) in [
+            ("M0 0 H20 V20 H0 Z", true),
+            ("M0 0 H20", false),
+            ("M0 0 H20 Z M40 0 H60", false),
+            ("M0 0 H20 Z M40 0 H60 Z", false),
+        ] {
+            let path = parse_path_data(data).unwrap();
+            assert_eq!(text_path_is_single_closed(&path), expected, "{data}");
+        }
+        assert_eq!(
+            text_path_glyph_distance(101.0, 0.0, 100.0, false, TextAlign::Start, Direction::LTR),
+            None
+        );
+        assert_eq!(
+            text_path_glyph_distance(-1.0, 0.0, 100.0, false, TextAlign::Start, Direction::LTR),
+            None
+        );
+    }
+
+    #[test]
+    fn native_rasterizer_wraps_closed_text_path_offsets_without_extra_circuits() {
+        let render = |offset: &str, text: &str, text_length: usize| {
+            let svg = format!(
+                r##"<svg width="100" height="100">
+                <defs><path id="baseline" d="M30 30 H54 V54 H30 Z"/></defs>
+                <text fill="black" font-size="10" font-family="monospace"><textPath href="#baseline" startOffset="{offset}" textLength="{text_length}">{text}</textPath></text>
+            </svg>"##
+            );
+            rasterize_svg_to_rgba(&svg, 100, 100).unwrap()
+        };
+        let reference = render("75%", "IIIIIIII", 96);
+        assert!(painted_bounds(&reference, 100).is_some());
+        for offset in ["-25%", "175%"] {
+            assert_eq!(render(offset, "IIIIIIII", 96), reference, "offset={offset}");
+        }
+        assert_eq!(render("75%", "IIIIIIIIIIIIIIII", 192), reference);
+    }
+
+    #[test]
+    fn native_rasterizer_does_not_wrap_mixed_text_path_subpaths() {
+        let data = rasterize_svg_to_rgba(
+            r##"<svg width="160" height="100">
+                <defs><path id="baseline" d="M30 30 H54 V54 H30 Z M90 30 H130"/></defs>
+                <text fill="black" font-size="10"><textPath href="#baseline" startOffset="150%">II</textPath></text>
+            </svg>"##, 160, 100).unwrap();
+        assert!(painted_bounds(&data, 160).is_none());
     }
 
     #[test]
@@ -6354,6 +7237,288 @@ mod tests {
             r < 80 && g < 80 && b > 150 && a > 200,
             "component-transfer pixel was {r},{g},{b},{a}"
         );
+    }
+
+    fn component_transfer_scalar_oracle(input: &Pixmap, node: &SvgNode) -> Pixmap {
+        let funcs = component_transfer_funcs(node);
+        let mut out = Pixmap::new(input.width(), input.height()).unwrap();
+        for (dst, src) in out.pixels_mut().iter_mut().zip(input.pixels()) {
+            let (r, g, b, a) = pixel_unpremul_rgba(*src);
+            let channel = |value: u8, func: Option<&ComponentTransferFunc>| -> f32 {
+                let value = value as f32 / 255.0;
+                func.map(|func| func.apply(value)).unwrap_or(value)
+            };
+            *dst = premul_from_unit_rgba(
+                channel(r, funcs.r.as_ref()),
+                channel(g, funcs.g.as_ref()),
+                channel(b, funcs.b.as_ref()),
+                channel(a, funcs.a.as_ref()),
+            );
+        }
+        out
+    }
+
+    thread_local! {
+        pub(super) static COMPONENT_TRANSFER_SCALAR_REFERENCE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    fn component_transfer_lut_cases() -> [&'static str; 9] {
+        [
+            "",
+            r#"<feFuncR type="identity"/><feFuncG type="identity"/><feFuncB type="identity"/><feFuncA type="identity"/>"#,
+            r#"<feFuncR type="gamma" amplitude="1.2" exponent="2.4" offset="-0.1"/><feFuncG type="gamma" amplitude="0.7" exponent="0.5" offset="0.2"/><feFuncB type="gamma" amplitude="-0.8" exponent="-0.5" offset="1.1"/><feFuncA type="gamma" amplitude="0.9" exponent="0.75" offset="0.05"/>"#,
+            r#"<feFuncR type="gamma" amplitude="0" exponent="-1" offset="0.3"/><feFuncG type="gamma" exponent="100"/><feFuncB type="gamma" exponent="0"/><feFuncA type="gamma" exponent="-1"/>"#,
+            r#"<feFuncR type="table" tableValues="-0.1 0.25 1.2 0.3"/><feFuncG type="table" tableValues="1 0"/><feFuncB type="table" tableValues="0.137 0.913"/><feFuncA type="table" tableValues="0 0.333 0.667 1"/>"#,
+            r#"<feFuncR type="table" tableValues=""/><feFuncG type="table" tableValues="0.125"/><feFuncB type="discrete" tableValues=""/><feFuncA type="table" tableValues="0.371"/>"#,
+            r#"<feFuncR type="discrete" tableValues="0 0.2 0.9 1"/><feFuncG type="discrete" tableValues="1 0.5 0"/><feFuncB type="discrete" tableValues="-1 2"/><feFuncA type="discrete" tableValues="0 0.1 0.333 0.9 1"/>"#,
+            r#"<feFuncR type="linear" slope="2.3" intercept="-0.2"/><feFuncG type="linear" slope="-0.7" intercept="1.1"/><feFuncB type="linear" slope="0" intercept="0.137"/><feFuncA type="linear" slope="0.73" intercept="0.111"/>"#,
+            r#"<feFuncR type="linear" slope="0" intercept="0"/><feFuncR type="gamma" exponent="1.7"/><feFuncB type="unknown"/><feFuncA type="linear" slope="0" intercept="0"/>"#,
+        ]
+    }
+
+    #[test]
+    fn component_transfer_lut_exhaustive_byte_inputs_and_alphas() {
+        let mut input = Pixmap::new(256, 256).unwrap();
+        for alpha in 0..=255u16 {
+            for value in 0..=255u16 {
+                input.pixels_mut()[usize::from(alpha) * 256 + usize::from(value)] =
+                    PremultipliedColorU8::from_rgba(
+                        value.min(alpha) as u8,
+                        (255 - value).min(alpha) as u8,
+                        ((value * 73) & 255).min(alpha) as u8,
+                        alpha as u8,
+                    )
+                    .unwrap();
+            }
+        }
+        for (case, functions) in component_transfer_lut_cases().iter().enumerate() {
+            let source =
+                format!("<svg><feComponentTransfer>{functions}</feComponentTransfer></svg>");
+            let document = parse_svg_document(&source).unwrap();
+            let node = document
+                .root
+                .children
+                .iter()
+                .find(|node| svg_tag_name(node).eq_ignore_ascii_case("feComponentTransfer"))
+                .unwrap();
+            let expected = component_transfer_scalar_oracle(&input, node);
+            let actual = component_transfer_filter_pixmap(&input, node);
+            for (index, (actual, expected)) in actual
+                .data()
+                .chunks_exact(4)
+                .zip(expected.data().chunks_exact(4))
+                .enumerate()
+            {
+                assert_eq!(
+                    actual,
+                    expected,
+                    "case={case} alpha={} component={}",
+                    index / 256,
+                    index % 256
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn component_transfer_small_image_exhaustive_byte_inputs_and_alphas() {
+        assert!(!COMPONENT_TRANSFER_SCALAR_REFERENCE.get());
+        let mut input = Pixmap::new(256, 1).unwrap();
+        for (case, functions) in component_transfer_lut_cases().iter().enumerate() {
+            let source =
+                format!("<svg><feComponentTransfer>{functions}</feComponentTransfer></svg>");
+            let document = parse_svg_document(&source).unwrap();
+            let node = document
+                .root
+                .children
+                .iter()
+                .find(|node| svg_tag_name(node).eq_ignore_ascii_case("feComponentTransfer"))
+                .unwrap();
+            for alpha in 0..=255u16 {
+                for value in 0..=255u16 {
+                    input.pixels_mut()[usize::from(value)] = PremultipliedColorU8::from_rgba(
+                        value.min(alpha) as u8,
+                        (255 - value).min(alpha) as u8,
+                        ((value * 73) & 255).min(alpha) as u8,
+                        alpha as u8,
+                    )
+                    .unwrap();
+                }
+                let expected = component_transfer_scalar_oracle(&input, node);
+                let actual = component_transfer_filter_pixmap(&input, node);
+                assert!(
+                    actual.data() == expected.data(),
+                    "case={case} alpha={alpha}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn component_transfer_lut_threshold_dimensions_match_scalar() {
+        assert!(!COMPONENT_TRANSFER_SCALAR_REFERENCE.get());
+        for (w, h) in [
+            (1, 1),
+            (7, 1),
+            (20, 10),
+            (255, 1),
+            (16, 16),
+            (257, 1),
+            (17, 17),
+        ] {
+            let mut input = Pixmap::new(w, h).unwrap();
+            for (i, pixel) in input.pixels_mut().iter_mut().enumerate() {
+                let a = (i & 255) as u8;
+                *pixel = PremultipliedColorU8::from_rgba(
+                    ((i * 19) & 255).min(usize::from(a)) as u8,
+                    ((i * 73) & 255).min(usize::from(a)) as u8,
+                    ((i * 137) & 255).min(usize::from(a)) as u8,
+                    a,
+                )
+                .unwrap();
+            }
+            for (case, functions) in component_transfer_lut_cases().iter().enumerate() {
+                let source =
+                    format!("<svg><feComponentTransfer>{functions}</feComponentTransfer></svg>");
+                let document = parse_svg_document(&source).unwrap();
+                let node = document
+                    .root
+                    .children
+                    .iter()
+                    .find(|node| svg_tag_name(node).eq_ignore_ascii_case("feComponentTransfer"))
+                    .unwrap();
+                let expected = component_transfer_scalar_oracle(&input, node);
+                let actual = component_transfer_filter_pixmap(&input, node);
+                assert!(actual.data() == expected.data(), "{w}x{h} case={case}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual warmed scalar/LUT primitive and whole-filter ABBA; exclusive CPU slot"]
+    fn component_transfer_lut_warmed_whole_filter_abba() {
+        use std::time::Instant;
+        fn cpu_ns() -> Option<u64> {
+            #[cfg(target_os = "macos")]
+            {
+                unsafe extern "C" {
+                    fn clock_gettime_nsec_np(clock_id: i32) -> u64;
+                }
+                Some(unsafe { clock_gettime_nsec_np(16) })
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                None
+            }
+        }
+        let repeats = std::env::var("SVG_COMPONENT_TRANSFER_BENCH_REPEATS")
+            .ok()
+            .map_or(12, |value| value.parse::<usize>().unwrap());
+        assert!(repeats >= 4 && repeats % 2 == 0);
+        let cases = component_transfer_lut_cases();
+        for size in [32u32, 256, 1024] {
+            let mut input = Pixmap::new(size, size).unwrap();
+            for (i, pixel) in input.pixels_mut().iter_mut().enumerate() {
+                let a = ((i * 37 + i / size as usize * 13) & 255) as u8;
+                *pixel = PremultipliedColorU8::from_rgba(
+                    ((i * 19) & 255).min(usize::from(a)) as u8,
+                    ((i * 73) & 255).min(usize::from(a)) as u8,
+                    ((i * 137) & 255).min(usize::from(a)) as u8,
+                    a,
+                )
+                .unwrap();
+            }
+            for (case, functions) in [
+                ("gamma", cases[2]),
+                ("linear", cases[7]),
+                ("identity", cases[1]),
+            ] {
+                let source = format!(
+                    "<svg><filter filterUnits=\"userSpaceOnUse\" x=\"0\" y=\"0\" width=\"{size}\" height=\"{size}\"><feComponentTransfer>{functions}</feComponentTransfer></filter><rect width=\"{size}\" height=\"{size}\"/></svg>"
+                );
+                let document = parse_svg_document(&source).unwrap();
+                let filter = document
+                    .root
+                    .children
+                    .iter()
+                    .find(|node| svg_tag_name(node) == "filter")
+                    .unwrap();
+                let primitive = filter
+                    .children
+                    .iter()
+                    .find(|node| svg_tag_name(node) == "feComponentTransfer")
+                    .unwrap();
+                let target = document
+                    .root
+                    .children
+                    .iter()
+                    .find(|node| svg_tag_name(node) == "rect")
+                    .unwrap();
+                let state = PaintState {
+                    viewport_width: size as f32,
+                    viewport_height: size as f32,
+                    ..PaintState::default()
+                };
+                for whole in [false, true] {
+                    let mut expected: Option<Vec<u8>> = None;
+                    let mut cpu: [Vec<f64>; 2] = Default::default();
+                    let mut wall: [Vec<f64>; 2] = Default::default();
+                    for trial in 0..4 + repeats * 2 {
+                        let scalar = [true, false, false, true][trial % 4];
+                        COMPONENT_TRANSFER_SCALAR_REFERENCE.set(scalar);
+                        let mut layer = whole.then(|| input.clone());
+                        let wall_start = Instant::now();
+                        let cpu_start = cpu_ns();
+                        let actual = if whole {
+                            apply_svg_filter(
+                                layer.as_mut().unwrap(),
+                                filter,
+                                target,
+                                &state,
+                                Transform::identity(),
+                            );
+                            layer.unwrap()
+                        } else {
+                            component_transfer_filter_pixmap(
+                                std::hint::black_box(&input),
+                                primitive,
+                            )
+                        };
+                        let cpu_elapsed = cpu_ns()
+                            .zip(cpu_start)
+                            .map(|(end, start)| (end - start) as f64 / 1_000_000.0);
+                        let wall_elapsed = wall_start.elapsed().as_secs_f64() * 1000.0;
+                        COMPONENT_TRANSFER_SCALAR_REFERENCE.set(false);
+                        if let Some(expected) = &expected {
+                            assert!(
+                                actual.data() == expected.as_slice(),
+                                "{size} case={case} whole={whole}"
+                            );
+                        } else {
+                            expected = Some(actual.data().to_vec());
+                        }
+                        if trial >= 4 {
+                            let mode = usize::from(scalar);
+                            if let Some(elapsed) = cpu_elapsed {
+                                cpu[mode].push(elapsed);
+                            }
+                            wall[mode].push(wall_elapsed);
+                        }
+                        std::hint::black_box(actual);
+                    }
+                    for mode in 0..2 {
+                        cpu[mode].sort_by(f64::total_cmp);
+                        wall[mode].sort_by(f64::total_cmp);
+                        let cpu_median = (!cpu[mode].is_empty()).then(|| cpu[mode][repeats / 2]);
+                        eprintln!(
+                            "SVG_COMPONENT_ABBA size={size} case={case} whole={whole} scalar={} repeats={repeats} cpu_ms={cpu_median:.3?} wall_ms={:.3}",
+                            mode == 1,
+                            wall[mode][repeats / 2]
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -9,33 +9,7 @@ use crate::types::WebCore;
 /// are directly usable. Contextual lengths like `%`/`em` must be left to CSS
 /// layout instead of being coerced by their numeric prefix.
 pub(crate) fn parse_svg_length_px(s: &str) -> Option<f32> {
-    let token = s
-        .trim()
-        .split(|c: char| c == ';' || c.is_whitespace())
-        .next()
-        .unwrap_or("");
-    if token.is_empty() || token.ends_with('%') {
-        return None;
-    }
-    let num_end = token
-        .char_indices()
-        .take_while(|(_, c)| c.is_ascii_digit() || matches!(c, '.' | '+' | '-'))
-        .last()
-        .map(|(idx, c)| idx + c.len_utf8())
-        .unwrap_or(0);
-    if num_end == 0 {
-        return None;
-    }
-    let (num, unit) = token.split_at(num_end);
-    if !unit.is_empty() && !unit.eq_ignore_ascii_case("px") {
-        return None;
-    }
-    let px = num.parse::<f32>().ok()?;
-    if px.is_finite() && px > 0.0 {
-        Some(px)
-    } else {
-        None
-    }
+    super::geometry::parse_svg_length(s).and_then(super::geometry::definite_intrinsic_length)
 }
 
 /// Parse definite pixels from a string like "20px", "512", "20px;height:10px".
@@ -70,7 +44,7 @@ pub(crate) struct InlineSvgSource {
 pub(crate) fn build_inline_svg_source(attrs: &AttrMap, body: &str) -> InlineSvgSource {
     let mut svg_tag = String::from("<svg");
     for (k, v) in attrs.iter() {
-        svg_tag.push_str(&format!(" {}=\"{}\"", k, v));
+        svg_tag.push_str(&format!(" {}=\"{}\"", k, escape_svg_attr(v)));
     }
     if !svg_tag.contains("xmlns=") {
         svg_tag.push_str(" xmlns=\"http://www.w3.org/2000/svg\"");
@@ -143,4 +117,40 @@ fn escape_svg_text(value: &str) -> String {
 
 fn escape_svg_attr(value: &str) -> String {
     escape_svg_text(value).replace('"', "&quot;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::svg::{SvgElementKind, parse_svg_document};
+
+    #[test]
+    fn root_attribute_escaping_roundtrips_without_injection() {
+        for value in [
+            "quote \" ampersand & less-than < greater-than > apostrophe '",
+            "&quot; &amp; &lt;",
+            "\" injected=\"yes",
+            "\"><g id=\"injected\"/></svg><svg data-note=\"",
+        ] {
+            let mut attrs = AttrMap::new();
+            attrs.insert("width", "20");
+            attrs.insert("data-note", value);
+            let source = build_inline_svg_source(&attrs, "<rect width=\"1\" height=\"1\"/>");
+            let doc = parse_svg_document(&source.markup).expect("escaped SVG must parse");
+
+            assert_eq!(doc.root.kind, SvgElementKind::Svg);
+            assert_eq!(doc.root.attr("data-note"), Some(value));
+            assert_eq!(doc.root.attr("width"), Some("20"));
+            assert_eq!(doc.root.attr("xmlns"), Some("http://www.w3.org/2000/svg"));
+            assert_eq!(doc.root.attributes.len(), 3, "unexpected root attributes");
+            assert_eq!(doc.root.children.len(), 1, "unexpected injected elements");
+            let rect = &doc.root.children[0];
+            assert_eq!(rect.kind, SvgElementKind::Rect);
+            assert_eq!(rect.attr("width"), Some("1"));
+            assert_eq!(rect.attr("height"), Some("1"));
+            assert_eq!(rect.attributes.len(), 2);
+            assert!(rect.children.is_empty());
+            assert!(doc.root.text.is_empty());
+        }
+    }
 }
